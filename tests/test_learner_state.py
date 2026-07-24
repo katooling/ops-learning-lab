@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import re
 import tempfile
-from threading import Thread
+from threading import Event, Thread
 import unittest
 from unittest.mock import patch
 from urllib.parse import urlencode
@@ -215,6 +215,55 @@ class AppendOnlyLearnerHistoryTests(unittest.TestCase):
 
             reopened = EventAttemptStore.open(home.root)
             reopened.close()
+
+    def test_removing_legacy_lock_leaf_cannot_create_a_second_writer(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = LearningHome.initialize(Path(directory) / "learning-home")
+            events = home.root / "private/learner-state/events"
+            legacy_lock = events / ".events.lock"
+            legacy_lock.write_text("", encoding="utf-8")
+            first = EventAttemptStore.open(home.root)
+            legacy_lock.unlink()
+            legacy_lock.write_text("", encoding="utf-8")
+            try:
+                with self.assertRaisesRegex(
+                    LearnerStateError,
+                    "already open",
+                ):
+                    EventAttemptStore.open(home.root)
+            finally:
+                first.close()
+
+    def test_close_waits_for_an_inflight_history_operation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = LearningHome.initialize(Path(directory) / "learning-home")
+            store = EventAttemptStore.open(home.root)
+            entered = Event()
+            release = Event()
+            close_started = Event()
+            original_read = store._read_events
+
+            def blocked_read():
+                entered.set()
+                self.assertTrue(release.wait(timeout=2))
+                return original_read()
+
+            def close_store():
+                close_started.set()
+                store.close()
+
+            store._read_events = blocked_read
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                history_future = executor.submit(store.history)
+                self.assertTrue(entered.wait(timeout=2))
+                close_future = executor.submit(close_store)
+                self.assertTrue(close_started.wait(timeout=2))
+                self.assertFalse(close_future.done())
+                release.set()
+                self.assertEqual(history_future.result(timeout=2).events, ())
+                close_future.result(timeout=2)
 
     def test_event_directory_replacement_fails_instead_of_hiding_history(
         self,

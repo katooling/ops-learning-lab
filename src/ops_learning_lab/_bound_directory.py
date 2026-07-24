@@ -182,37 +182,22 @@ class _BoundDirectory:
         self._require_path_binding()
         return names
 
-    def open_lock(self, name: str, label: str) -> int:
-        """Open one private advisory-lock file relative to this directory."""
+    def duplicate_for_lock(self, label: str) -> int:
+        """Duplicate the bound directory inode for an advisory lock."""
 
         self._require_open()
-        self._require_leaf_name(name)
         self._validate_bound_descriptor()
         self._require_path_binding()
-        flags = (
-            os.O_RDWR
-            | os.O_CREAT
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0)
-        )
         try:
-            descriptor = os.open(
-                name,
-                flags,
-                0o600,
-                dir_fd=self._descriptor,
-            )
+            descriptor = os.dup(self._descriptor)
         except OSError as exc:
-            raise StorageError(f"cannot open {label}") from exc
+            raise StorageError(f"cannot duplicate {label}") from exc
         try:
             metadata = os.fstat(descriptor)
             if (
-                not stat.S_ISREG(metadata.st_mode)
-                or (
-                    hasattr(os, "getuid")
-                    and metadata.st_uid != os.getuid()
-                )
-                or metadata.st_mode & 0o077
+                not stat.S_ISDIR(metadata.st_mode)
+                or metadata.st_dev != self._device
+                or metadata.st_ino != self._inode
             ):
                 raise StorageError(f"{label} is unsafe")
             self._require_path_binding()

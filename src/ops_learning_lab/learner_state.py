@@ -306,9 +306,8 @@ class EventAttemptStore:
                 "learner event directory",
                 private=True,
             )
-            lock_descriptor = events.open_lock(
-                EVENT_LOCK_FILE,
-                "learner event lock",
+            lock_descriptor = events.duplicate_for_lock(
+                "learner event directory lock",
             )
             try:
                 fcntl.flock(
@@ -334,11 +333,12 @@ class EventAttemptStore:
             raise LearnerStateError(str(exc)) from exc
 
     def close(self) -> None:
-        if self._lock_descriptor >= 0:
-            fcntl.flock(self._lock_descriptor, fcntl.LOCK_UN)
-            os.close(self._lock_descriptor)
-            self._lock_descriptor = -1
-        self._events.close()
+        with self._lock:
+            if self._lock_descriptor >= 0:
+                fcntl.flock(self._lock_descriptor, fcntl.LOCK_UN)
+                os.close(self._lock_descriptor)
+                self._lock_descriptor = -1
+            self._events.close()
 
     def get(self, attempt_id: str) -> AttemptCheckpoint | None:
         entry = self.history().get(attempt_id)
