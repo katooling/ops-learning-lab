@@ -122,7 +122,7 @@ npm --prefix tests/browser ci
 `verify` runs fast checks, complete-history safety, real Chromium journeys,
 and a final publication audit. Playwright is a test dependency, not a product
 dependency. See [Release verification](docs/releasing.md) for the exact gates
-and the current pre-release history blocker.
+and the fail-closed recovery path.
 
 ## Safety
 

@@ -52,84 +52,30 @@ starting. Its error prints the exact missing installation command.
 CI checks out complete Git history. A shallow checkout fails closed because it
 cannot prove deleted historical content is safe.
 
-## Current pre-release blocker
+## If the history gate fails
 
-As of 2026-07-24, the history audit intentionally fails. Two reachable squash
-commits use the same unapproved author address. The audit reports their object
-IDs and a one-way email fingerprint; it does not repeat the address.
+Treat a history-audit failure as a release blocker. Do not weaken the allowlist
+to make a private identity, secret, internal path, or unsafe historical blob
+pass.
 
-This is a real release blocker, not a test exception. Do not add the address to
-the allowlist. The history must be rewritten once, reviewed, and force-pushed
-before tagging version 0.1.0.
+1. Stop release work and identify every public ref that reaches the unsafe
+   object.
+2. Make and verify a private Git bundle or mirror before changing history.
+3. Repair the narrow cause in a separate clone. Rewriting history changes every
+   descendant object ID, so do not reuse branches based on the old history.
+4. Prove that the rewritten tree is unchanged when the repair is metadata-only.
+5. Run `./scripts/verify` in the rewritten clone.
+6. Update the remote only with an exact force-with-lease against the public
+   commit you inspected.
+7. Clone the public remote into a new directory and run `./scripts/verify`
+   again.
+8. Remove obsolete local branches and temporary rewrite files. Retain the
+   private backup according to your backup policy.
 
-## Safe one-time history rewrite
-
-History rewriting changes every descendant object ID. Freeze merges and ask
-collaborators to stop pushing first. Ensure the public remote has no feature
-branch or existing tag that still retains the old commits:
-
-```bash
-git ls-remote --heads origin
-git ls-remote --tags origin
-```
-
-Only `refs/heads/main` should remain. If another public ref exists, stop and
-decide whether to delete it or include it in the rewrite.
-
-Install `git-filter-repo` from its official package, then work in a fresh
-temporary clone:
-
-```bash
-release_root=$(mktemp -d)
-git clone --mirror https://github.com/katooling/ops-learning-lab.git \
-  "$release_root/private-backup.git"
-git clone https://github.com/katooling/ops-learning-lab.git \
-  "$release_root/rewrite"
-cd "$release_root/rewrite"
-
-old_main=$(git rev-parse origin/main)
-old_email=$(git show -s --format=%ae 95168f9)
-second_email=$(git show -s --format=%ae 2a9f20b)
-test "$old_email" = "$second_email"
-new_email=72454341+Mohamad-Kamar@users.noreply.github.com
-printf 'Mohamad Kamar <%s> <%s>\n' "$new_email" "$old_email" \
-  >"$release_root/release.mailmap"
-
-git filter-repo --force --mailmap "$release_root/release.mailmap"
-git remote add origin https://github.com/katooling/ops-learning-lab.git
-```
-
-The mailmap file is deliberately outside the repository. Keep the mirror
-backup private: it contains the history being removed.
-
-Prove the rewritten candidate before changing the remote:
-
-```bash
-npm --prefix tests/browser ci
-(cd tests/browser && npx playwright install chromium)
-./scripts/verify
-
-test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$old_main"
-git push --force-with-lease=refs/heads/main:"$old_main" origin main
-```
-
-Delete or replace any open local clone after the force-push. Do not merge work
-created from the old history.
-
-Clone again and prove what the public remote actually serves:
-
-```bash
-cd "$release_root"
-git clone https://github.com/katooling/ops-learning-lab.git public-proof
-cd public-proof
-npm --prefix tests/browser ci
-(cd tests/browser && npx playwright install chromium)
-./scripts/verify
-```
-
-Keep the private mirror until this fresh-clone proof passes. Then remove the
-temporary mailmap and rewrite clone. Retain or securely remove the mirror
-according to your backup policy.
+If other people or public branches depend on the old history, coordinate the
+rewrite before updating the remote. Hosting-provider caches and unreachable
+objects are outside the local history audit; contact the provider when strict
+server-side removal is required.
 
 ## Tag version 0.1.0
 
