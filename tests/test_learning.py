@@ -6,6 +6,7 @@ from ops_learning_lab.activity import (
     CODEX_ETL_ACTIVITY,
     ActivityResult,
     render_activity,
+    render_scenario,
 )
 from ops_learning_lab.attempts import (
     AttemptCheckpoint,
@@ -24,6 +25,7 @@ class SyntheticEtlActivityTests(unittest.TestCase):
 
         self.assertEqual(first, second)
         self.assertEqual(first.input_sha256, CODEX_ETL_ACTIVITY.input_sha256)
+        self.assertEqual(first.scenario_id, CODEX_ETL_ACTIVITY.scenario_id)
         self.assertEqual(first.status, "complete")
         self.assertEqual(first.source_rows, 3)
         self.assertEqual(first.raw_rows, 3)
@@ -56,6 +58,12 @@ class SyntheticEtlActivityTests(unittest.TestCase):
         with self.assertRaisesRegex(SchemaError, "fields"):
             ActivityResult.from_dict({**result, "mastery": "demonstrated"})
 
+    def test_unknown_scenario_or_seed_fails_closed(self):
+        with self.assertRaisesRegex(SchemaError, "unknown synthetic scenario"):
+            render_scenario("unknown-scenario", 7, ())
+        with self.assertRaisesRegex(SchemaError, "seed"):
+            render_scenario(CODEX_ETL_ACTIVITY.scenario_id, 8, ())
+
     def test_renderer_rejects_unknown_or_reordered_commands(self):
         for actions in (
             ("skip-validation",),
@@ -79,13 +87,13 @@ class LearnerAttemptContractTests(unittest.TestCase):
             outcome_revision_sha256="b" * 64,
             started_at="2026-07-24T12:00:00Z",
             updated_at="2026-07-24T12:05:00Z",
-            loop_step="complete",
+            next_step="complete",
             prediction=Prediction(
                 choice_id="continues-with-duplicate",
                 confidence=4,
             ),
             renderer=RendererCheckpoint(
-                activity_id=CODEX_ETL_ACTIVITY.activity_id,
+                scenario_id=CODEX_ETL_ACTIVITY.scenario_id,
                 input_sha256=CODEX_ETL_ACTIVITY.input_sha256,
                 seed=CODEX_ETL_ACTIVITY.seed,
                 effective_actions=("run-pipeline",),
@@ -124,7 +132,7 @@ class LearnerAttemptContractTests(unittest.TestCase):
     def test_checkpoint_rejects_unknown_fields_and_cross_activity_results(self):
         result = render_activity(CODEX_ETL_ACTIVITY, ("run-pipeline",))
         renderer = RendererCheckpoint(
-            activity_id=CODEX_ETL_ACTIVITY.activity_id,
+            scenario_id=CODEX_ETL_ACTIVITY.scenario_id,
             input_sha256=CODEX_ETL_ACTIVITY.input_sha256,
             seed=CODEX_ETL_ACTIVITY.seed,
             effective_actions=("run-pipeline",),
@@ -136,7 +144,7 @@ class LearnerAttemptContractTests(unittest.TestCase):
             RendererCheckpoint.from_dict({**renderer.to_dict(), "mastery": "owned"})
         with self.assertRaisesRegex(SchemaError, "does not match"):
             RendererCheckpoint(
-                activity_id="other-activity",
+                scenario_id="other-scenario",
                 input_sha256=CODEX_ETL_ACTIVITY.input_sha256,
                 seed=CODEX_ETL_ACTIVITY.seed,
                 effective_actions=("run-pipeline",),
@@ -147,7 +155,7 @@ class LearnerAttemptContractTests(unittest.TestCase):
     def test_scenario_reset_keeps_attempt_and_seed_but_clears_effective_actions(self):
         initial = render_activity(CODEX_ETL_ACTIVITY, ())
         reset = RendererCheckpoint(
-            activity_id=CODEX_ETL_ACTIVITY.activity_id,
+            scenario_id=CODEX_ETL_ACTIVITY.scenario_id,
             input_sha256=CODEX_ETL_ACTIVITY.input_sha256,
             seed=CODEX_ETL_ACTIVITY.seed,
             effective_actions=(),
