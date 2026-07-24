@@ -6,8 +6,9 @@ import argparse
 from pathlib import Path
 
 from ops_learning_lab.export_repository import ExportRepository
+from ops_learning_lab.export_approval import ExportApproval
 from ops_learning_lab.exporting import ExportPolicy, StandaloneExporter
-from tests.fixtures_learning import bundle
+from tests.fixtures_learning import accepted_snapshot, bundle
 
 
 def main() -> int:
@@ -17,9 +18,14 @@ def main() -> int:
     exports = arguments.output / "exports"
     exports.mkdir(parents=True)
     with ExportRepository.open(exports) as repository:
+        learning_bundle = bundle()
         receipt = StandaloneExporter(repository).export(
-            bundle(),
+            learning_bundle,
             ExportPolicy((b"PRIVATE-BROWSER-SMOKE-CANARY",)),
+            approval=ExportApproval.build(
+                learning_bundle,
+                accepted_snapshot(),
+            ),
         )
     print((exports / receipt.relative_path).resolve())
     return 0

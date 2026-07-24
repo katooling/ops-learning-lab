@@ -7,6 +7,8 @@ from hashlib import sha256
 from html import escape
 from typing import Any, Iterator
 
+from .activity import CODEX_ETL_ACTIVITY, render_scenario
+from .export_approval import ExportApproval
 from .export_repository import ExportRepository
 from .learning_bundle import LearningPackBundle
 
@@ -61,6 +63,8 @@ class ExportReceipt:
     artifact_sha256: str
     bundle_sha256: str
     accepted_snapshot_sha256: str
+    approval_id: str
+    approval_sha256: str
     relative_path: str
     canary_digests: tuple[str, ...]
     already_exists: bool
@@ -76,6 +80,8 @@ class ExportReceipt:
             "artifact_sha256": self.artifact_sha256,
             "bundle_sha256": self.bundle_sha256,
             "accepted_snapshot_sha256": self.accepted_snapshot_sha256,
+            "approval_id": self.approval_id,
+            "approval_sha256": self.approval_sha256,
             "relative_path": self.relative_path,
             "files_scanned": self.files_scanned,
             "canary_digests": list(self.canary_digests),
@@ -93,18 +99,23 @@ class StandaloneExporter:
         self,
         bundle: LearningPackBundle,
         policy: ExportPolicy,
+        *,
+        approval: ExportApproval,
     ) -> ExportReceipt:
         if not isinstance(bundle, LearningPackBundle):
             raise ExportError("export source must be a validated Learning Pack Bundle")
         if not isinstance(policy, ExportPolicy):
             raise ExportError("export policy does not match the schema")
+        if not isinstance(approval, ExportApproval):
+            raise ExportError("export requires an explicit immutable approval")
+        approval.require_bundle(bundle)
 
         projection = _publishable_projection(bundle)
         _assert_canaries_absent(
             _logical_strings(projection),
             policy.forbidden_canaries,
         )
-        rendered = _render_html(bundle)
+        rendered = _render_html(bundle, approval)
         _assert_rendered_canaries_absent(rendered, policy.forbidden_canaries)
         if len(rendered) > policy.max_export_bytes:
             raise ExportError("standalone export exceeds its size limit")
@@ -122,6 +133,8 @@ class StandaloneExporter:
             artifact_sha256=artifact_sha256,
             bundle_sha256=bundle.bundle_sha256,
             accepted_snapshot_sha256=bundle.accepted_snapshot_sha256,
+            approval_id=approval.approval_id,
+            approval_sha256=approval.approval_sha256,
             relative_path=relative_path,
             canary_digests=policy.canary_digests,
             already_exists=commit.already_exists,
@@ -205,6 +218,7 @@ def _publishable_projection(bundle: LearningPackBundle) -> dict[str, Any]:
                     "renderer_capabilities": list(
                         lesson.activity.renderer_capabilities
                     ),
+                    **_public_activity_execution(lesson.activity),
                 },
                 "evidence": {
                     "claim": lesson.evidence.claim,
@@ -239,6 +253,29 @@ def _publishable_projection(bundle: LearningPackBundle) -> dict[str, Any]:
             }
             for lesson in bundle.lessons
         ],
+    }
+
+
+def _public_activity_execution(activity: Any) -> dict[str, Any]:
+    """Resolve the one built-in public fixture and its deterministic result."""
+
+    result = render_scenario(
+        activity.scenario_id,
+        activity.seed,
+        activity.input_revision_sha256,
+        ("run-pipeline",),
+    )
+    if (
+        activity.scenario_id != CODEX_ETL_ACTIVITY.scenario_id
+        or activity.seed != CODEX_ETL_ACTIVITY.seed
+        or activity.input_revision_sha256 != CODEX_ETL_ACTIVITY.input_sha256
+    ):
+        raise ExportError("standalone export has no approved public activity fixture")
+    return {
+        "public_records": [
+            record.to_dict() for record in CODEX_ETL_ACTIVITY.records
+        ],
+        "deterministic_result": result.to_dict(),
     }
 
 
@@ -281,7 +318,10 @@ def _assert_rendered_canaries_absent(
             )
 
 
-def _render_html(bundle: LearningPackBundle) -> bytes:
+def _render_html(
+    bundle: LearningPackBundle,
+    approval: ExportApproval,
+) -> bytes:
     projection = _publishable_projection(bundle)
     pack = projection["pack"]
     concepts = "".join(
@@ -323,13 +363,19 @@ def _render_html(bundle: LearningPackBundle) -> bytes:
 <title>{escape(pack["title"])} · Learning Pack</title>
 <style>
 :root {{ color-scheme: light dark; font-family: system-ui, sans-serif; line-height: 1.5; }}
-body {{ max-width: 64rem; margin: 0 auto; padding: 1.5rem; }}
+* {{ box-sizing: border-box; }}
+html, body {{ max-width: 100%; }}
+body {{ max-width: 64rem; margin: 0 auto; padding: clamp(.75rem, 4vw, 1.5rem); overflow-wrap: anywhere; }}
 section, article {{ margin-block: 1.5rem; }}
-.map {{ display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit,minmax(12rem,1fr)); }}
+.map {{ display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit,minmax(min(12rem,100%),1fr)); }}
 .card {{ border: 1px solid; border-radius: .4rem; padding: 1rem; }}
 .skip-link {{ position: absolute; left: -10000px; }}
 .skip-link:focus {{ position: static; }}
 dt {{ font-weight: 700; }}
+dd {{ margin-inline-start: min(2rem, 6vw); }}
+code {{ overflow-wrap: anywhere; word-break: break-all; }}
+.records {{ padding-inline-start: 1.25rem; }}
+.records > li {{ border-block-start: 1px solid; padding-block: .75rem; }}
 </style>
 </head>
 <body>
@@ -343,6 +389,8 @@ dt {{ font-weight: 700; }}
 <section id="artifact-identity" aria-labelledby="identity">
 <h2 id="identity">Reviewed artifact identity</h2>
 <dl>
+<dt>Export approval</dt><dd><code>{escape(approval.approval_id)}</code></dd>
+<dt>Approval digest</dt><dd><code>{escape(approval.approval_sha256)}</code></dd>
 <dt>Learning Pack Bundle</dt><dd><code>{escape(bundle.bundle_sha256)}</code></dd>
 <dt>Accepted Pack snapshot</dt><dd><code>{escape(bundle.accepted_snapshot_sha256)}</code></dd>
 </dl>
@@ -377,6 +425,27 @@ def _render_lesson(lesson: dict[str, Any]) -> str:
         "</li>"
         for action in lesson["activity"]["actions"]
     )
+    records = "".join(
+        "<li><dl>"
+        f"<dt>Event</dt><dd>{escape(record['event_id'])}</dd>"
+        f"<dt>Learner alias</dt><dd>{escape(record['learner_alias'])}</dd>"
+        f"<dt>Model</dt><dd>{escape(record['model'])}</dd>"
+        f"<dt>Credits</dt><dd>{record['credits']}</dd>"
+        "</dl></li>"
+        for record in lesson["activity"]["public_records"]
+    )
+    result = lesson["activity"]["deterministic_result"]
+    deterministic_result = (
+        "<dl>"
+        f"<dt>Validation passed</dt><dd>{str(result['validation_passed']).lower()}</dd>"
+        f"<dt>Duplicate excess rows</dt><dd>{result['duplicate_excess_rows']}</dd>"
+        f"<dt>Processing stopped</dt><dd>{str(result['processing_stopped']).lower()}</dd>"
+        f"<dt>Job completed</dt><dd>{str(result['job_completed']).lower()}</dd>"
+        f"<dt>Published total</dt><dd>{result['downstream_cost_cents']} cents</dd>"
+        f"<dt>Unique-record total</dt><dd>{result['unique_cost_cents']} cents</dd>"
+        f"<dt>Result state</dt><dd><code>{escape(result['state_sha256'])}</code></dd>"
+        "</dl>"
+    )
     evidence = "".join(
         '<article class="card">'
         f"<h4>{escape(card['title'])}</h4>"
@@ -401,6 +470,10 @@ def _render_lesson(lesson: dict[str, Any]) -> str:
         "<h3>Try</h3>"
         f"<p>{escape(lesson['activity']['instructions'])}</p>"
         f"<ul>{actions}</ul>"
+        "<h4>Public synthetic records</h4>"
+        f'<ol class="records">{records}</ol>'
+        "<h4>Deterministic result</h4>"
+        f"{deterministic_result}"
         "<h3>Prove</h3>"
         f"<p>{escape(lesson['evidence']['claim'])}</p>"
         f'<div class="map">{evidence}</div>'

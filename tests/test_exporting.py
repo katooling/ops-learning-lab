@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,7 @@ from ops_learning_lab.compiler import compile_update
 from ops_learning_lab.domain import SchemaError
 from ops_learning_lab.domain import SourceReference
 from ops_learning_lab.export_repository import ExportRepository
+from ops_learning_lab.export_approval import ExportApproval
 from ops_learning_lab.exporting import ExportError, ExportPolicy, StandaloneExporter
 from ops_learning_lab.learning_bundle import LearningPackBundle
 from ops_learning_lab.pack_repository import PackRepository
@@ -35,6 +37,18 @@ def repository(root: Path) -> ExportRepository:
     return ExportRepository.open(exports)
 
 
+def approved_export(
+    exporter: StandaloneExporter,
+    learning_bundle: LearningPackBundle,
+    policy: ExportPolicy,
+):
+    return exporter.export(
+        learning_bundle,
+        policy,
+        approval=ExportApproval.build(learning_bundle, accepted_snapshot()),
+    )
+
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = REPOSITORY_ROOT / "src"
 
@@ -52,7 +66,45 @@ def run_cli(*arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def prepare_cli_export(root: Path) -> tuple[Path, str, Path]:
+def start_cli_paused_after_publishable_home_open(
+    *arguments: str,
+) -> subprocess.Popen[str]:
+    """Run the real CLI with one deterministic test-only process checkpoint."""
+
+    script = """
+import os
+import signal
+import sys
+from ops_learning_lab.cli import main
+from ops_learning_lab.publishable_home import PublishableHome
+
+original_open = PublishableHome.open.__func__
+
+def paused_open(cls, path):
+    home = original_open(cls, path)
+    os.kill(os.getpid(), signal.SIGSTOP)
+    return home
+
+PublishableHome.open = classmethod(paused_open)
+raise SystemExit(main(sys.argv[1:]))
+"""
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(SOURCE_ROOT)
+    return subprocess.Popen(
+        [sys.executable, "-c", script, *arguments],
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
+def prepare_cli_export(
+    root: Path,
+    *,
+    approve: bool = True,
+) -> tuple[Path, str, Path]:
     home = LearningHome.initialize(root / "learning-home")
     pack_root = home.root / "packs" / "synthetic-etl"
     pack_root.mkdir()
@@ -69,6 +121,16 @@ def prepare_cli_export(root: Path) -> tuple[Path, str, Path]:
         bundles.save(learning_bundle)
     canary_file = root / "canary.bin"
     canary_file.write_bytes(CANARY)
+    if approve:
+        result = run_cli(
+            "export-approve",
+            "--home",
+            str(home.root),
+            "--bundle-sha256",
+            learning_bundle.bundle_sha256,
+        )
+        if result.returncode != 0:
+            raise AssertionError(result.stderr)
     return home.root, learning_bundle.bundle_sha256, canary_file
 
 
@@ -90,6 +152,99 @@ def rebuild_lesson(lesson, **changes):
 
 
 class StandaloneExporterTests(unittest.TestCase):
+    def test_cli_approval_is_explicit_deterministic_and_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home, bundle_sha256, _ = prepare_cli_export(root, approve=False)
+            arguments = (
+                "export-approve",
+                "--home",
+                str(home),
+                "--bundle-sha256",
+                bundle_sha256,
+            )
+
+            first = run_cli(*arguments)
+            second = run_cli(*arguments)
+
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            first_receipt = json.loads(first.stdout)
+            second_receipt = json.loads(second.stdout)
+            self.assertEqual(first_receipt["status"], "approved")
+            self.assertEqual(second_receipt["status"], "already-approved")
+            self.assertEqual(
+                {
+                    key: value
+                    for key, value in first_receipt.items()
+                    if key != "status"
+                },
+                {
+                    key: value
+                    for key, value in second_receipt.items()
+                    if key != "status"
+                },
+            )
+            self.assertEqual(
+                len(list((home / "snapshots" / "export-approvals").iterdir())),
+                1,
+            )
+
+    def test_cli_rejects_canonical_but_unapproved_bundle_content(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home, bundle_sha256, canary_file = prepare_cli_export(
+                root,
+                approve=False,
+            )
+
+            unapproved = run_cli(
+                "export",
+                "--home",
+                str(home),
+                "--bundle-sha256",
+                bundle_sha256,
+                "--canary-file",
+                str(canary_file),
+            )
+
+            self.assertEqual(unapproved.returncode, 1)
+            self.assertIn("explicitly approved", unapproved.stderr)
+            self.assertEqual(list((home / "exports").iterdir()), [])
+
+            original = bundle()
+            changed = LearningPackBundle.build(
+                accepted_snapshot(),
+                concepts=(
+                    replace(
+                        original.concepts[0],
+                        title="Unapproved but schema-valid concept",
+                    ),
+                ),
+                lessons=(
+                    rebuild_lesson(
+                        original.lessons[0],
+                        title="Unapproved but schema-valid lesson",
+                    ),
+                ),
+            )
+            with BundleRepository.open(home) as bundles:
+                bundles.save(changed)
+
+            changed_export = run_cli(
+                "export",
+                "--home",
+                str(home),
+                "--bundle-sha256",
+                changed.bundle_sha256,
+                "--canary-file",
+                str(canary_file),
+            )
+
+            self.assertEqual(changed_export.returncode, 1)
+            self.assertIn("explicitly approved", changed_export.stderr)
+            self.assertEqual(list((home / "exports").iterdir()), [])
+
     def test_cli_exports_only_a_canonical_stored_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -109,8 +264,87 @@ class StandaloneExporterTests(unittest.TestCase):
             receipt = json.loads(result.stdout)
             self.assertEqual(receipt["privacy_status"], "passed")
             self.assertEqual(receipt["files_scanned"], 1)
+            self.assertRegex(
+                receipt["approval_id"],
+                r"^export-approval-[0-9a-f]{20}$",
+            )
+            self.assertRegex(receipt["approval_sha256"], r"^[0-9a-f]{64}$")
             artifact = home / "exports" / receipt["relative_path"]
             self.assertTrue(artifact.is_file())
+
+    def test_later_promotion_does_not_invalidate_approved_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home_path, bundle_sha256, canary_file = prepare_cli_export(root)
+            home = LearningHome.open(home_path)
+            raw = b"Claim: A second synthetic reviewed claim."
+            manifest = home.capture(
+                raw,
+                SourceReference(
+                    source_type="synthetic-note",
+                    source_id="second-promotion",
+                    observed_at="2026-07-25T12:00:00Z",
+                ),
+            )
+            updates = PackUpdateRepository.open(home.root)
+            staged = updates.stage(compile_update(raw, manifest))
+            service = PromotionService(
+                updates,
+                PackRepository.open(home.root),
+                clock=lambda: "2026-07-25T12:00:01Z",
+            )
+            review = service.review(
+                staged.update_id,
+                target_pack_id="synthetic-etl",
+                target_pack_title="Synthetic ETL evidence",
+            )
+            plan = PromotionPlan(
+                update_id=staged.update_id,
+                proposal_sha256=staged.proposal_sha256,
+                target_pack_id=review.target_pack_id,
+                target_pack_title=review.target_pack_title,
+                expected_base_version=review.expected_base_version,
+                expected_base_sha256=review.expected_base_sha256,
+                decisions=(
+                    PromotionDecision(
+                        proposal_id=staged.proposed_claims[0].proposal_id,
+                        action="accept",
+                        sanitized_text="A later accepted snapshot exists.",
+                        fact_status="current",
+                        history_action="add",
+                        target_claim_id=None,
+                        sensitivity_reviewed=True,
+                        rejection_reason=None,
+                    ),
+                ),
+            )
+            preview = service.preview(plan)
+            service.commit(plan, preview.preview_sha256)
+            current = PackRepository.open(home.root).snapshot("synthetic-etl")
+            self.assertIsNotNone(current)
+            assert current is not None
+            self.assertEqual(current.version, 2)
+
+            result = run_cli(
+                "export",
+                "--home",
+                str(home.root),
+                "--bundle-sha256",
+                bundle_sha256,
+                "--canary-file",
+                str(canary_file),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            receipt = json.loads(result.stdout)
+            self.assertEqual(
+                receipt["accepted_snapshot_sha256"],
+                bundle().accepted_snapshot_sha256,
+            )
+            self.assertNotEqual(
+                receipt["accepted_snapshot_sha256"],
+                current.content_sha256,
+            )
 
     def test_cli_rejects_malformed_or_symlinked_canonical_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -230,6 +464,14 @@ class StandaloneExporterTests(unittest.TestCase):
                 bundles.save(learning_bundle)
             canary_file = root / "private-canary.bin"
             canary_file.write_bytes(CANARY)
+            approved = run_cli(
+                "export-approve",
+                "--home",
+                str(home.root),
+                "--bundle-sha256",
+                learning_bundle.bundle_sha256,
+            )
+            self.assertEqual(approved.returncode, 0, approved.stderr)
 
             result = run_cli(
                 "export",
@@ -277,15 +519,55 @@ class StandaloneExporterTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 1)
-            self.assertIn("cannot be a symbolic link", result.stderr)
+            self.assertIn("missing or unsafe", result.stderr)
             self.assertEqual(list((moved / "exports").iterdir()), [])
+
+    @unittest.skipUnless(
+        hasattr(os, "WUNTRACED") and hasattr(signal, "SIGSTOP"),
+        "requires POSIX process-stop support",
+    )
+    def test_real_cli_rejects_ancestor_replacement_after_home_is_open(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home, bundle_sha256, canary_file = prepare_cli_export(root)
+            process = start_cli_paused_after_publishable_home_open(
+                "export",
+                "--home",
+                str(home),
+                "--bundle-sha256",
+                bundle_sha256,
+                "--canary-file",
+                str(canary_file),
+            )
+            try:
+                waited, status = os.waitpid(process.pid, os.WUNTRACED)
+                self.assertEqual(waited, process.pid)
+                self.assertTrue(os.WIFSTOPPED(status))
+
+                displaced = root / "learning-home-displaced"
+                home.rename(displaced)
+                home.mkdir()
+                (home / "exports").mkdir()
+                os.kill(process.pid, signal.SIGCONT)
+                stdout, stderr = process.communicate(timeout=10)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate()
+
+            self.assertEqual(process.returncode, 1, stdout)
+            self.assertIn("learning home changed after it was opened", stderr)
+            self.assertEqual(list((home / "exports").iterdir()), [])
+            self.assertEqual(list((displaced / "exports").iterdir()), [])
 
     def test_exporter_capability_excludes_private_and_staged_stores(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             exporter = StandaloneExporter(repository(root))
 
-            receipt = exporter.export(bundle(), ExportPolicy((CANARY,)))
+            receipt = approved_export(exporter, bundle(), ExportPolicy((CANARY,)))
 
             self.assertEqual(set(exporter.__dict__), {"repository"})
             self.assertEqual(
@@ -302,8 +584,8 @@ class StandaloneExporterTests(unittest.TestCase):
             exporter = StandaloneExporter(repository(root))
             policy = ExportPolicy((CANARY,))
 
-            first = exporter.export(bundle(), policy)
-            second = exporter.export(bundle(), policy)
+            first = approved_export(exporter, bundle(), policy)
+            second = approved_export(exporter, bundle(), policy)
 
             self.assertFalse(first.already_exists)
             self.assertTrue(second.already_exists)
@@ -321,6 +603,8 @@ class StandaloneExporterTests(unittest.TestCase):
             self.assertIn("Does not prove", content)
             self.assertIn(bundle().bundle_sha256, content)
             self.assertIn(bundle().accepted_snapshot_sha256, content)
+            self.assertIn(first.approval_id, content)
+            self.assertIn(first.approval_sha256, content)
             self.assertIn(bundle().lessons[0].lesson_revision_sha256, content)
             self.assertIn(
                 bundle().lessons[0].outcome.outcome_revision_sha256,
@@ -328,6 +612,15 @@ class StandaloneExporterTests(unittest.TestCase):
             )
             self.assertIn(
                 bundle().lessons[0].activity.input_revision_sha256,
+                content,
+            )
+            self.assertEqual(content.count("<li><dl><dt>Event</dt>"), 3)
+            self.assertIn("<dd>event-001</dd>", content)
+            self.assertIn("<dd>event-002</dd>", content)
+            self.assertIn("<dt>Duplicate excess rows</dt><dd>1</dd>", content)
+            self.assertIn("<dt>Published total</dt><dd>7 cents</dd>", content)
+            self.assertIn(
+                "<dt>Unique-record total</dt><dd>5 cents</dd>",
                 content,
             )
             self.assertNotIn("update-" + "2" * 20, content)
@@ -345,7 +638,7 @@ class StandaloneExporterTests(unittest.TestCase):
             shutil.rmtree(root / "exports")
             self.assertIn("Trace one safe record", outside.read_text(encoding="utf-8"))
 
-    def test_semantic_only_revision_changes_artifact_identity_and_path(self) -> None:
+    def test_semantic_copy_change_changes_artifact_identity_and_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             exporter = StandaloneExporter(repository(root))
@@ -358,14 +651,17 @@ class StandaloneExporterTests(unittest.TestCase):
                         original.lessons[0],
                         activity=replace(
                             original.lessons[0].activity,
-                            input_revision_sha256="9" * 64,
+                            instructions=(
+                                "Apply the same deterministic validation rule, "
+                                "then inspect every public result."
+                            ),
                         ),
                     ),
                 ),
             )
 
-            first = exporter.export(original, ExportPolicy((CANARY,)))
-            second = exporter.export(changed, ExportPolicy((CANARY,)))
+            first = approved_export(exporter, original, ExportPolicy((CANARY,)))
+            second = approved_export(exporter, changed, ExportPolicy((CANARY,)))
 
             self.assertNotEqual(first.export_id, second.export_id)
             self.assertNotEqual(first.artifact_sha256, second.artifact_sha256)
@@ -389,7 +685,7 @@ class StandaloneExporterTests(unittest.TestCase):
             exporter = StandaloneExporter(repository(root))
 
             with self.assertRaisesRegex(ExportError, "privacy canary"):
-                exporter.export(unsafe, ExportPolicy((canary,)))
+                approved_export(exporter, unsafe, ExportPolicy((canary,)))
 
             self.assertEqual(list((root / "exports").iterdir()), [])
 
@@ -407,7 +703,8 @@ class StandaloneExporterTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            receipt = StandaloneExporter(repository(root)).export(
+            receipt = approved_export(
+                StandaloneExporter(repository(root)),
                 safe,
                 ExportPolicy((CANARY,)),
             )
@@ -422,7 +719,8 @@ class StandaloneExporterTests(unittest.TestCase):
             root = Path(directory)
             exporter = StandaloneExporter(repository(root))
             with self.assertRaisesRegex(ExportError, "size limit"):
-                exporter.export(
+                approved_export(
+                    exporter,
                     bundle(),
                     ExportPolicy((CANARY,), max_export_bytes=10),
                 )
@@ -431,7 +729,7 @@ class StandaloneExporterTests(unittest.TestCase):
                 return_value=b"<html>" + CANARY + b"</html>",
             ):
                 with self.assertRaisesRegex(ExportError, "privacy canary"):
-                    exporter.export(bundle(), ExportPolicy((CANARY,)))
+                    approved_export(exporter, bundle(), ExportPolicy((CANARY,)))
             self.assertEqual(list((root / "exports").iterdir()), [])
 
     def test_repository_rejects_path_symlink_and_fifo_hazards(self) -> None:
@@ -453,14 +751,14 @@ class StandaloneExporterTests(unittest.TestCase):
             root = Path(directory)
             repo = repository(root)
             exporter = StandaloneExporter(repo)
-            receipt = exporter.export(bundle(), ExportPolicy((CANARY,)))
+            receipt = approved_export(exporter, bundle(), ExportPolicy((CANARY,)))
             target = root / "exports" / receipt.relative_path
             target.unlink()
             outside = root / "outside.html"
             outside.write_text("untouched", encoding="utf-8")
             target.symlink_to(outside)
             with self.assertRaisesRegex(StorageError, "cannot read"):
-                exporter.export(bundle(), ExportPolicy((CANARY,)))
+                approved_export(exporter, bundle(), ExportPolicy((CANARY,)))
             self.assertEqual(outside.read_text(encoding="utf-8"), "untouched")
 
         if hasattr(os, "mkfifo"):
@@ -468,19 +766,27 @@ class StandaloneExporterTests(unittest.TestCase):
                 root = Path(directory)
                 repo = repository(root)
                 exporter = StandaloneExporter(repo)
-                receipt = exporter.export(bundle(), ExportPolicy((CANARY,)))
+                receipt = approved_export(
+                    exporter,
+                    bundle(),
+                    ExportPolicy((CANARY,)),
+                )
                 target = root / "exports" / receipt.relative_path
                 target.unlink()
                 os.mkfifo(target)
                 with self.assertRaisesRegex(StorageError, "regular file"):
-                    exporter.export(bundle(), ExportPolicy((CANARY,)))
+                    approved_export(
+                        exporter,
+                        bundle(),
+                        ExportPolicy((CANARY,)),
+                    )
 
     def test_interrupted_write_leaves_prior_export_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             repo = repository(root)
             exporter = StandaloneExporter(repo)
-            prior = exporter.export(bundle(), ExportPolicy((CANARY,)))
+            prior = approved_export(exporter, bundle(), ExportPolicy((CANARY,)))
             prior_path = root / "exports" / prior.relative_path
             prior_bytes = prior_path.read_bytes()
             original = bundle()
@@ -498,7 +804,7 @@ class StandaloneExporterTests(unittest.TestCase):
                 side_effect=OSError("synthetic interruption"),
             ):
                 with self.assertRaisesRegex(OSError, "synthetic interruption"):
-                    exporter.export(changed, ExportPolicy((CANARY,)))
+                    approved_export(exporter, changed, ExportPolicy((CANARY,)))
 
             self.assertEqual(prior_path.read_bytes(), prior_bytes)
             self.assertEqual(
@@ -541,7 +847,11 @@ class StandaloneExporterTests(unittest.TestCase):
                     StorageError,
                     "changed during atomic commit",
                 ):
-                    exporter.export(bundle(), ExportPolicy((CANARY,)))
+                    approved_export(
+                        exporter,
+                        bundle(),
+                        ExportPolicy((CANARY,)),
+                    )
 
             self.assertEqual(list(exports.iterdir()), [])
             self.assertEqual(list(displaced.iterdir()), [])
@@ -550,7 +860,11 @@ class StandaloneExporterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             exporter = StandaloneExporter(repository(Path(directory)))
             with self.assertRaisesRegex(ExportError, "validated"):
-                exporter.export({"pack_id": "synthetic"}, ExportPolicy((CANARY,)))  # type: ignore[arg-type]
+                exporter.export(  # type: ignore[arg-type]
+                    {"pack_id": "synthetic"},
+                    ExportPolicy((CANARY,)),
+                    approval=ExportApproval.build(bundle(), accepted_snapshot()),
+                )
             with self.assertRaisesRegex(ExportError, "at least one"):
                 ExportPolicy(())
             with self.assertRaises(SchemaError):

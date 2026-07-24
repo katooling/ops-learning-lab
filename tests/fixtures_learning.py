@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ops_learning_lab.activity import CODEX_ETL_ACTIVITY
 from ops_learning_lab.learning_bundle import (
     ActivitySpec,
     Choice,
@@ -118,19 +119,19 @@ def lesson() -> LessonBlueprint:
             expected_choice_id="negative-cost",
         ),
         activity=ActivitySpec(
-            scenario_id="synthetic-cost-validation",
+            scenario_id=CODEX_ETL_ACTIVITY.scenario_id,
             instructions="Apply the validation rule to the two safe records.",
-            seed=7,
-            input_revision_sha256="4" * 64,
+            seed=CODEX_ETL_ACTIVITY.seed,
+            input_revision_sha256=CODEX_ETL_ACTIVITY.input_sha256,
             actions=(
                 ScenarioAction(
-                    "validate",
-                    "Validate records",
+                    "run-pipeline",
+                    "Run the pipeline",
                     "Produce deterministic validation observations.",
                 ),
                 ScenarioAction(
-                    "reset",
-                    "Reset",
+                    "reset-scenario",
+                    "Reset the scenario",
                     "Restore the same synthetic starting state.",
                 ),
             ),
