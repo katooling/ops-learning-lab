@@ -15,6 +15,7 @@ from .codex_import import (
     CodexImportError,
     CodexImportRequest,
     CodexImportService,
+    MAX_IMPORT_BYTES,
     ProductShellLearningPort,
 )
 from .bundle_repository import BundleRepository
@@ -256,10 +257,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if arguments.command == "codex-import":
-            encoded = sys.stdin.buffer.read(MAX_CAPTURE_BYTES + 1)
-            if len(encoded) > MAX_CAPTURE_BYTES:
+            encoded = sys.stdin.buffer.read(MAX_IMPORT_BYTES + 1)
+            if len(encoded) > MAX_IMPORT_BYTES:
                 raise StorageError(
-                    f"Codex import exceeds the {MAX_CAPTURE_BYTES}-byte safety limit"
+                    f"Codex import exceeds the {MAX_IMPORT_BYTES}-byte safety limit"
                 )
             request = CodexImportRequest.from_dict(
                 decode_json_object(encoded, "Codex import request")

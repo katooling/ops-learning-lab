@@ -118,8 +118,10 @@ one listed identifier:
 }
 ```
 
-The retry is content-addressed. It reuses the same intake and staged update,
-then routes learning only after the explicit choice.
+The retry is content-addressed. It reuses the same raw intake when the source,
+scope, observation time, and content are identical. It creates a new immutable
+staged update whose `selected` Pack Match records the explicit destination,
+then routes learning.
 
 ## Target selected Codex task turns
 
@@ -155,8 +157,9 @@ or:
 There is deliberately no `all`, omitted selection, or whole-history mode. The
 read-only conversation port exposes only `read_selected(task_id, selection)`.
 Its result must echo the requested task and scope before any local write occurs.
-The private manifest retains the task ID, selected turn IDs or range,
-observation time, and SHA-256 content identity.
+The private manifest retains the task ID, a canonical JSON representation of
+the selected turn IDs or range, observation time, and SHA-256 content identity.
+The canonical scope prevents delimiter-shaped turn IDs from colliding.
 
 The stock CLI does not have direct Codex task access yet. It rejects these
 requests with `targeted Codex task reads are not configured` and writes
@@ -194,4 +197,3 @@ The focused tests prove exact pasted import, targeted synthetic turn retrieval,
 provenance, strict schemas, idempotency, Capture/Learn separation, ambiguous
 choice handling, Product Shell routing, unchanged prior state on retrieval
 errors, and a task port with no mutation capability.
-

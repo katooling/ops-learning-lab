@@ -235,13 +235,15 @@ class PromotionService:
         update = self.updates.get(plan.update_id)
         if update.proposal_sha256 != plan.proposal_sha256:
             raise StalePromotionError("staged Pack Update changed after review")
-        if update.match.kind == "strong":
+        if update.match.kind in {"strong", "selected"}:
             candidate = update.match.candidates[0]
             if (
                 plan.target_pack_id != candidate.pack_id
                 or plan.target_pack_title != candidate.title
             ):
-                raise PromotionError("strong match target does not match the proposal")
+                raise PromotionError(
+                    f"{update.match.kind} match target does not match the proposal"
+                )
         elif update.match.kind == "ambiguous":
             candidates = {
                 (candidate.pack_id, candidate.title)
@@ -295,7 +297,7 @@ class PromotionService:
     def _inferred_target(
         update: StagedPackUpdate,
     ) -> tuple[str | None, str | None]:
-        if update.match.kind == "strong":
+        if update.match.kind in {"strong", "selected"}:
             candidate = update.match.candidates[0]
             return candidate.pack_id, candidate.title
         if update.match.kind == "new_pack":

@@ -9,6 +9,7 @@ import tempfile
 import unittest
 
 from ops_learning_lab.codex_import import (
+    CodexImportError,
     CodexImportRequest,
     CodexImportService,
     ConversationExtract,
@@ -17,6 +18,9 @@ from ops_learning_lab.codex_import import (
     TurnSelection,
 )
 from ops_learning_lab.domain import SchemaError
+from ops_learning_lab.pack_repository import PackRepository
+from ops_learning_lab.promotion import PromotionService
+from ops_learning_lab.staging import PackUpdateRepository
 from ops_learning_lab.storage import LearningHome
 
 
@@ -226,7 +230,7 @@ class CodexImportServiceTests(unittest.TestCase):
             self.assertEqual(manifest.source.source_id, "synthetic-task-7")
             self.assertEqual(
                 manifest.source.retrieval_scope,
-                "turn_ids:turn-2,turn-4",
+                '{"turn_ids":["turn-2","turn-4"]}',
             )
             self.assertEqual(
                 manifest.source.observed_at,
@@ -253,6 +257,37 @@ class CodexImportServiceTests(unittest.TestCase):
                     },
                 }
             )
+
+    def test_schema_version_rejects_boolean_alias_for_one(self) -> None:
+        with self.assertRaisesRegex(SchemaError, "schema_version"):
+            CodexImportRequest.from_dict(
+                {
+                    "schema_version": True,
+                    "mode": "capture",
+                    "source": {
+                        "kind": "pasted_text",
+                        "source_id": "strict-version",
+                        "observed_at": "2026-07-24T12:00:00Z",
+                        "text": "Synthetic Codex ETL usage.",
+                    },
+                }
+            )
+
+    def test_scope_identity_is_unambiguous_for_adversarial_turn_ids(self) -> None:
+        self.assertNotEqual(
+            TurnSelection(turn_ids=("a,b", "c")).scope(),
+            TurnSelection(turn_ids=("a", "b", "c")).scope(),
+        )
+        self.assertNotEqual(
+            TurnSelection(
+                start_turn_id="a..b",
+                end_turn_id="c",
+            ).scope(),
+            TurnSelection(
+                start_turn_id="a",
+                end_turn_id="b..c",
+            ).scope(),
+        )
 
     def test_capture_ambiguity_stages_but_does_not_open_learning(self) -> None:
         learning = self.LearningPort()
@@ -349,7 +384,64 @@ class CodexImportServiceTests(unittest.TestCase):
                 selected["selected_pack_id"],
                 "workflow-validation",
             )
+            updates = PackUpdateRepository.open(home.root)
+            persisted = updates.get(selected["update_id"])
+            self.assertEqual(persisted.match.kind, "selected")
+            self.assertEqual(
+                persisted.match.proposed_pack_id,
+                "workflow-validation",
+            )
+            review = PromotionService(
+                updates,
+                PackRepository.open(home.root),
+            ).review(selected["update_id"])
+            self.assertEqual(review.target_pack_id, "workflow-validation")
             self.assertEqual(learning.calls, ["workflow-validation"])
+
+    def test_same_content_observed_later_retains_both_observation_times(self) -> None:
+        source = {
+            "kind": "pasted_text",
+            "source_id": "observed-synthetic-paste",
+            "text": "Synthetic Codex ETL usage cost tokens.",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            home = LearningHome.initialize(Path(directory) / "learning-home")
+            service = CodexImportService(home)
+
+            first = service.run(
+                CodexImportRequest.from_dict(
+                    {
+                        "schema_version": 1,
+                        "mode": "capture",
+                        "source": {
+                            **source,
+                            "observed_at": "2026-07-24T12:00:00Z",
+                        },
+                    }
+                )
+            )
+            later = service.run(
+                CodexImportRequest.from_dict(
+                    {
+                        "schema_version": 1,
+                        "mode": "capture",
+                        "source": {
+                            **source,
+                            "observed_at": "2026-07-25T12:00:00Z",
+                        },
+                    }
+                )
+            )
+
+            self.assertNotEqual(first["intake_id"], later["intake_id"])
+            self.assertEqual(
+                home.read_manifest(first["intake_id"]).source.observed_at,
+                "2026-07-24T12:00:00Z",
+            )
+            self.assertEqual(
+                home.read_manifest(later["intake_id"]).source.observed_at,
+                "2026-07-25T12:00:00Z",
+            )
 
     def test_learn_with_no_existing_pack_match_stages_and_explains_gap(self) -> None:
         learning = self.LearningPort()
@@ -461,6 +553,63 @@ class CodexImportServiceTests(unittest.TestCase):
         )
         self.assertEqual(destination.disposition, "opened")
         self.assertIsNone(destination.attempt_id)
+
+    def test_learning_port_error_reports_staged_artifacts_and_preserves_prior_state(
+        self,
+    ) -> None:
+        class FailingLearningPort:
+            def open_or_resume(self, pack_id: str) -> LearningDestination:
+                raise CodexImportError("synthetic Product Shell failure")
+
+        initial = CodexImportRequest.from_dict(
+            {
+                "schema_version": 1,
+                "mode": "capture",
+                "source": {
+                    "kind": "pasted_text",
+                    "source_id": "prior-synthetic-paste",
+                    "observed_at": "2026-07-24T11:00:00Z",
+                    "text": "Synthetic workflow validation freshness quality.",
+                },
+            }
+        )
+        learning_request = CodexImportRequest.from_dict(
+            {
+                "schema_version": 1,
+                "mode": "learn",
+                "source": {
+                    "kind": "pasted_text",
+                    "source_id": "failing-learn-paste",
+                    "observed_at": "2026-07-24T12:00:00Z",
+                    "text": "Synthetic Codex ETL usage cost tokens.",
+                },
+            }
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            home = LearningHome.initialize(Path(directory) / "learning-home")
+            CodexImportService(home).run(initial)
+            prior = {
+                path.relative_to(home.root): path.read_bytes()
+                for path in home.root.rglob("*")
+                if path.is_file()
+            }
+
+            result = CodexImportService(
+                home,
+                learning_port=FailingLearningPort(),
+            ).run(learning_request)
+
+            self.assertEqual(result["status"], "learning_incomplete")
+            self.assertIn("synthetic Product Shell failure", result["learning_error"])
+            self.assertTrue(result["intake_id"])
+            self.assertTrue(result["update_id"])
+            current = {
+                path.relative_to(home.root): path.read_bytes()
+                for path in home.root.rglob("*")
+                if path.is_file()
+            }
+            for path, content in prior.items():
+                self.assertEqual(current[path], content)
 
 
 if __name__ == "__main__":

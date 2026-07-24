@@ -17,7 +17,7 @@ UPDATE_ID_PATTERN = re.compile(r"^update-[0-9a-f]{20}$")
 PACK_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 PROPOSAL_ID_PATTERN = re.compile(r"^proposal-[0-9a-f]{20}$")
 FACT_STATUSES = frozenset({"current", "historical", "contradicted", "unverified"})
-MATCH_KINDS = frozenset({"strong", "ambiguous", "new_pack"})
+MATCH_KINDS = frozenset({"strong", "selected", "ambiguous", "new_pack"})
 
 
 class SchemaError(ValueError):
@@ -268,11 +268,15 @@ class PackMatch:
         candidate_ids = tuple(candidate.pack_id for candidate in self.candidates)
         if len(set(candidate_ids)) != len(candidate_ids):
             raise SchemaError("match candidates must be unique")
-        if self.kind == "strong":
+        if self.kind in {"strong", "selected"}:
             if len(self.candidates) != 1:
-                raise SchemaError("a strong match requires exactly one candidate")
+                raise SchemaError(
+                    f"a {self.kind} match requires exactly one candidate"
+                )
             if self.proposed_pack_id != self.candidates[0].pack_id:
-                raise SchemaError("a strong match must propose its only candidate")
+                raise SchemaError(
+                    f"a {self.kind} match must propose its only candidate"
+                )
         elif self.kind == "ambiguous":
             if len(self.candidates) < 2 or self.proposed_pack_id is not None:
                 raise SchemaError("an ambiguous match requires learner choice")

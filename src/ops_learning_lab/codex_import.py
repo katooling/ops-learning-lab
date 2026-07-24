@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Any, Protocol
 
 from .compiler import compile_update, propose_pack_match, validate_capture_text
 from .domain import SchemaError, SourceReference
 from .staging import PackUpdateRepository
-from .storage import LearningHome
+from .storage import LearningHome, StorageError
 
 
 IMPORT_SCHEMA_VERSION = 1
@@ -36,6 +37,11 @@ class PastedTextSource:
     source_id: str
     observed_at: str
     text: str
+
+    def __post_init__(self) -> None:
+        _non_empty_text(self.source_id, "source_id")
+        _non_empty_text(self.observed_at, "observed_at")
+        _non_empty_text(self.text, "text")
 
     @classmethod
     def from_dict(cls, value: Any) -> PastedTextSource:
@@ -79,14 +85,24 @@ class TurnSelection:
 
     def scope(self) -> str:
         if self.turn_ids:
-            return "turn_ids:" + ",".join(self.turn_ids)
-        return f"turn_range:{self.start_turn_id}..{self.end_turn_id}"
+            value: dict[str, object] = {"turn_ids": list(self.turn_ids)}
+        else:
+            value = {
+                "end_turn_id": self.end_turn_id,
+                "start_turn_id": self.start_turn_id,
+            }
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
 @dataclass(frozen=True, slots=True)
 class TaskTurnsSource:
     task_id: str
     selection: TurnSelection
+
+    def __post_init__(self) -> None:
+        _non_empty_text(self.task_id, "task_id")
+        if not isinstance(self.selection, TurnSelection):
+            raise SchemaError("selection must be a TurnSelection")
 
     @classmethod
     def from_dict(cls, value: Any) -> TaskTurnsSource:
@@ -132,6 +148,20 @@ class CodexImportRequest:
     selected_pack_id: str | None = None
     schema_version: int = IMPORT_SCHEMA_VERSION
 
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.schema_version, int)
+            or isinstance(self.schema_version, bool)
+            or self.schema_version != IMPORT_SCHEMA_VERSION
+        ):
+            raise SchemaError("unsupported Codex import schema_version")
+        if self.mode not in {"capture", "learn"}:
+            raise SchemaError("mode must be capture or learn")
+        if not isinstance(self.source, (PastedTextSource, TaskTurnsSource)):
+            raise SchemaError("source kind is not supported")
+        if self.selected_pack_id is not None:
+            _non_empty_text(self.selected_pack_id, "selected_pack_id")
+
     @classmethod
     def from_dict(cls, value: Any) -> CodexImportRequest:
         if not isinstance(value, dict) or set(value) not in {
@@ -142,7 +172,11 @@ class CodexImportRequest:
         }:
             raise SchemaError("Codex import request fields do not match the schema")
         request = value
-        if request["schema_version"] != IMPORT_SCHEMA_VERSION:
+        if (
+            not isinstance(request["schema_version"], int)
+            or isinstance(request["schema_version"], bool)
+            or request["schema_version"] != IMPORT_SCHEMA_VERSION
+        ):
             raise SchemaError("unsupported Codex import schema_version")
         if request["mode"] not in {"capture", "learn"}:
             raise SchemaError("mode must be capture or learn")
@@ -174,6 +208,8 @@ class ConversationExtract:
 
     def __post_init__(self) -> None:
         _non_empty_text(self.task_id, "task_id")
+        if not isinstance(self.selection, TurnSelection):
+            raise SchemaError("selection must be a TurnSelection")
         _non_empty_text(self.observed_at, "observed_at")
         if not isinstance(self.content, bytes) or not self.content:
             raise SchemaError("conversation extract content must be non-empty bytes")
@@ -219,7 +255,12 @@ class ProductShellLearningPort:
         self.learning = learning
 
     def open_or_resume(self, pack_id: str) -> LearningDestination:
-        lessons = self.learning.available_lessons(pack_id)
+        try:
+            lessons = self.learning.available_lessons(pack_id)
+        except (SchemaError, StorageError, ValueError) as exc:
+            raise CodexImportError(
+                "Product Shell could not inspect the accepted lesson"
+            ) from exc
         if len(lessons) != 1:
             raise CodexImportError(
                 "exactly one Product Shell lesson must be available for Learn Mode"
@@ -258,7 +299,13 @@ class CodexImportService:
         selected_pack_id = self._selected_pack(request, match)
 
         manifest = self.home.capture(content, source)
-        update = self.updates.stage(compile_update(content, manifest))
+        update = self.updates.stage(
+            compile_update(
+                content,
+                manifest,
+                selected_pack_id=request.selected_pack_id,
+            )
+        )
         unresolved = update.match.kind == "ambiguous" and selected_pack_id is None
         result: dict[str, object] = {
             "status": "learner_choice_required" if unresolved else "staged",
