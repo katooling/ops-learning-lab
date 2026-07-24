@@ -12,6 +12,7 @@ from ops_learning_lab.learning_bundle import (
     EvidenceExercise,
     ExplanationPrompt,
     LearningPackBundle,
+    LearningOutcome,
     LessonBlueprint,
     MapStage,
     Prediction,
@@ -49,11 +50,15 @@ def accepted_snapshot() -> AcceptedPackSnapshot:
 
 
 def lesson() -> LessonBlueprint:
-    return LessonBlueprint(
+    return LessonBlueprint.build(
         lesson_id="trace-one-record",
         title="Trace one safe record",
         concept_id="proof-scope",
         claim_id="claim-" + "1" * 20,
+        outcome=LearningOutcome.build(
+            "select-exact-evidence",
+            "Select evidence that proves the exact operational claim.",
+        ),
         map_stages=(
             MapStage(
                 stage_id="source",
@@ -78,6 +83,7 @@ def lesson() -> LessonBlueprint:
             scenario_id="synthetic-cost-validation",
             instructions="Apply the validation rule to the two safe records.",
             seed=7,
+            input_revision_sha256="4" * 64,
             actions=(
                 ScenarioAction(
                     "validate",
@@ -104,12 +110,20 @@ def lesson() -> LessonBlueprint:
                     "Validation result",
                     "The selected normalized record failed its rule.",
                     "The downstream view refreshed.",
+                    "synthetic-validation-output",
+                    "one deterministic validation run",
+                    "public-synthetic",
+                    "2026-07-24T12:00:00Z",
                 ),
                 EvidenceCard(
                     "job-success",
                     "Job status",
                     "The job process completed.",
                     "Every business rule passed.",
+                    "synthetic-job-browser",
+                    "one process completion status",
+                    "public-synthetic",
+                    "2026-07-24T12:00:00Z",
                 ),
             ),
             required_support=("validation-result",),
@@ -117,8 +131,15 @@ def lesson() -> LessonBlueprint:
         ),
         explanation=ExplanationPrompt(
             prompt="Explain why job success is not enough evidence.",
-            required_concepts=("proof-scope",),
             minimum_characters=24,
+            qualification=Prediction(
+                prompt="What does a successful job prove?",
+                choices=(
+                    Choice("process-completed", "The process completed."),
+                    Choice("all-rules-passed", "Every business rule passed."),
+                ),
+                expected_choice_id="process-completed",
+            ),
         ),
     )
 
@@ -160,12 +181,34 @@ class LearningPackBundleTests(unittest.TestCase):
             LearningPackBundle.from_dict(value)
 
         value = bundle().to_dict()
+        value["lessons"][0]["outcome"]["statement"] = "Tampered outcome"
+        with self.assertRaisesRegex(SchemaError, "outcome revision"):
+            LearningPackBundle.from_dict(value)
+
+        value = bundle().to_dict()
+        value["lessons"][0]["title"] = "Tampered lesson"
+        with self.assertRaisesRegex(SchemaError, "lesson revision"):
+            LearningPackBundle.from_dict(value)
+
+        value = bundle().to_dict()
         value["bundle_sha256"] = "f" * 64
         with self.assertRaisesRegex(SchemaError, "bundle_sha256"):
             LearningPackBundle.from_dict(value)
 
     def test_bundle_rejects_stale_lesson_references(self) -> None:
-        bad_lesson = replace(lesson(), claim_id="claim-" + "9" * 20)
+        original = lesson()
+        bad_lesson = LessonBlueprint.build(
+            lesson_id=original.lesson_id,
+            title=original.title,
+            concept_id=original.concept_id,
+            claim_id="claim-" + "9" * 20,
+            outcome=original.outcome,
+            map_stages=original.map_stages,
+            prediction=original.prediction,
+            activity=original.activity,
+            evidence=original.evidence,
+            explanation=original.explanation,
+        )
         with self.assertRaisesRegex(SchemaError, "missing accepted claim"):
             LearningPackBundle.build(
                 accepted_snapshot(),
