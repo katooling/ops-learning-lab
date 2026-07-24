@@ -370,6 +370,21 @@ class CodexImportCliTests(unittest.TestCase):
                 "observed_at": "2026-07-24T12:30:00Z",
                 "text": "Synthetic Codex ETL usage.",
             },
+            {
+                "kind": "task_turns_extract",
+                "task_id": "synthetic-task-7",
+                "turn_ids": [" ALL "],
+                "observed_at": "2026-07-24T12:30:00Z",
+                "text": "Synthetic Codex ETL usage.",
+            },
+            {
+                "kind": "task_turn_range_extract",
+                "task_id": "synthetic-task-7",
+                "start_turn_id": "*",
+                "end_turn_id": "turn-4",
+                "observed_at": "2026-07-24T12:30:00Z",
+                "text": "Synthetic Codex ETL usage.",
+            },
         )
         for source in unsafe_sources:
             with self.subTest(kind=source["kind"]):
@@ -377,6 +392,25 @@ class CodexImportCliTests(unittest.TestCase):
                     home = LearningHome.initialize(
                         Path(directory) / "learning-home"
                     )
+                    prior = run_codex_import(
+                        home.root,
+                        {
+                            "schema_version": 1,
+                            "mode": "capture",
+                            "source": {
+                                "kind": "pasted_text",
+                                "source_id": "prior-synthetic-paste",
+                                "observed_at": "2026-07-24T11:00:00Z",
+                                "text": "Synthetic workflow validation freshness.",
+                            },
+                        },
+                    )
+                    self.assertEqual(prior.returncode, 0, prior.stderr)
+                    before = {
+                        path.relative_to(home.root): path.read_bytes()
+                        for path in home.root.rglob("*")
+                        if path.is_file()
+                    }
 
                     result = run_codex_import(
                         home.root,
@@ -388,14 +422,12 @@ class CodexImportCliTests(unittest.TestCase):
                     )
 
                     self.assertEqual(result.returncode, 1)
-                    self.assertEqual(
-                        list((home.root / "private" / "inbox").iterdir()),
-                        [],
-                    )
-                    self.assertEqual(
-                        list((home.root / "staged" / "updates").iterdir()),
-                        [],
-                    )
+                    after = {
+                        path.relative_to(home.root): path.read_bytes()
+                        for path in home.root.rglob("*")
+                        if path.is_file()
+                    }
+                    self.assertEqual(after, before)
 
 
 class CodexImportServiceTests(unittest.TestCase):

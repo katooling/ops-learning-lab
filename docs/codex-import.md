@@ -181,6 +181,12 @@ representation of the selected turn IDs or range, observation time, and
 SHA-256 content identity. The canonical scope prevents delimiter-shaped turn
 IDs from colliding. Repeating the exact extract is idempotent.
 
+The inline `text` is caller-attested. The CLI proves its exact bytes and
+declared selection after receipt, but it cannot prove that a caller extracted
+only those turns. The explicitly invoked conversation-query skill owns that
+retrieval boundary and must show it before reading. Use the host read-only port
+when the host needs to enforce the selection itself.
+
 A host integration may instead send `task_turns` or `task_turn_range` without
 inline text and supply the read-only conversation port. That port exposes only
 `read_selected(task_id, selection)`, and its result must echo the exact task

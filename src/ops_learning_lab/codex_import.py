@@ -15,6 +15,9 @@ from .storage import LearningHome, StorageError
 
 IMPORT_SCHEMA_VERSION = 1
 MAX_IMPORT_BYTES = 1_048_576
+RESERVED_WHOLE_HISTORY_SELECTORS = frozenset(
+    {"*", "all", "history", "whole-history", "whole_history"}
+)
 
 
 class CodexImportError(RuntimeError):
@@ -31,6 +34,13 @@ def _non_empty_text(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise SchemaError(f"{label} must be a non-empty string")
     return value
+
+
+def _turn_id(value: Any, label: str) -> str:
+    turn_id = _non_empty_text(value, label)
+    if turn_id.strip().casefold() in RESERVED_WHOLE_HISTORY_SELECTORS:
+        raise SchemaError(f"{label} cannot select a whole task history")
+    return turn_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,10 +89,10 @@ class TurnSelection:
             if len(set(self.turn_ids)) != len(self.turn_ids):
                 raise SchemaError("turn_ids must be unique")
             for turn_id in self.turn_ids:
-                _non_empty_text(turn_id, "turn_id")
+                _turn_id(turn_id, "turn_id")
         else:
-            _non_empty_text(self.start_turn_id, "start_turn_id")
-            _non_empty_text(self.end_turn_id, "end_turn_id")
+            _turn_id(self.start_turn_id, "start_turn_id")
+            _turn_id(self.end_turn_id, "end_turn_id")
 
     def scope(self) -> str:
         if self.turn_ids:
