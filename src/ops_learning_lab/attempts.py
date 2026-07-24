@@ -240,7 +240,9 @@ class AttemptCheckpoint:
     pack_id: str
     pack_version: int
     pack_sha256: str
+    bundle_sha256: str
     lesson_id: str
+    lesson_revision_sha256: str
     outcome_id: str
     outcome_revision_sha256: str
     started_at: str
@@ -275,6 +277,8 @@ class AttemptCheckpoint:
             raise SchemaError("attempt pack_version must be positive")
         for value, field in (
             (self.pack_sha256, "pack_sha256"),
+            (self.bundle_sha256, "bundle_sha256"),
+            (self.lesson_revision_sha256, "lesson_revision_sha256"),
             (self.outcome_revision_sha256, "outcome_revision_sha256"),
         ):
             if not isinstance(value, str) or not SHA256_PATTERN.fullmatch(value):
@@ -354,7 +358,9 @@ class AttemptCheckpoint:
             "pack_id": self.pack_id,
             "pack_version": self.pack_version,
             "pack_sha256": self.pack_sha256,
+            "bundle_sha256": self.bundle_sha256,
             "lesson_id": self.lesson_id,
+            "lesson_revision_sha256": self.lesson_revision_sha256,
             "outcome_id": self.outcome_id,
             "outcome_revision_sha256": self.outcome_revision_sha256,
             "started_at": self.started_at,
@@ -381,6 +387,34 @@ class AttemptCheckpoint:
             **self._content_dict(),
             "checkpoint_sha256": self.checkpoint_sha256,
         }
+
+    def evolve(self, **changes: Any) -> AttemptCheckpoint:
+        """Create the next content-addressed checkpoint without mutating history."""
+
+        content = {
+            "attempt_id": self.attempt_id,
+            "pack_id": self.pack_id,
+            "pack_version": self.pack_version,
+            "pack_sha256": self.pack_sha256,
+            "bundle_sha256": self.bundle_sha256,
+            "lesson_id": self.lesson_id,
+            "lesson_revision_sha256": self.lesson_revision_sha256,
+            "outcome_id": self.outcome_id,
+            "outcome_revision_sha256": self.outcome_revision_sha256,
+            "started_at": self.started_at,
+            "updated_at": self.updated_at,
+            "next_step": self.next_step,
+            "prediction": self.prediction,
+            "renderer": self.renderer,
+            "evidence": self.evidence,
+            "explanation": self.explanation,
+            "hints": self.hints,
+            "completed": self.completed,
+        }
+        unknown = set(changes).difference(content)
+        if unknown:
+            raise SchemaError("attempt evolution fields do not match the schema")
+        return self.build(**{**content, **changes})
 
     @classmethod
     def build(cls, **content: Any) -> AttemptCheckpoint:
@@ -416,7 +450,9 @@ class AttemptCheckpoint:
             "pack_id",
             "pack_version",
             "pack_sha256",
+            "bundle_sha256",
             "lesson_id",
+            "lesson_revision_sha256",
             "outcome_id",
             "outcome_revision_sha256",
             "started_at",
@@ -442,7 +478,9 @@ class AttemptCheckpoint:
             pack_id=value["pack_id"],
             pack_version=value["pack_version"],
             pack_sha256=value["pack_sha256"],
+            bundle_sha256=value["bundle_sha256"],
             lesson_id=value["lesson_id"],
+            lesson_revision_sha256=value["lesson_revision_sha256"],
             outcome_id=value["outcome_id"],
             outcome_revision_sha256=value["outcome_revision_sha256"],
             started_at=value["started_at"],

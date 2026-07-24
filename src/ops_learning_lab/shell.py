@@ -13,6 +13,9 @@ import secrets
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .domain import SchemaError
+from .attempts import EvidenceDecision
+from .learning_service import LearningError, LearningService
+from .lesson_views import attempt_page, lesson_overview
 from .promotion import PromotionService
 from .promotion_models import PromotionError, PromotionPlan, StalePromotionError
 from .shell_views import (
@@ -36,6 +39,7 @@ def make_server(
     port: int,
     *,
     promotion: PromotionService | None = None,
+    learning: LearningService | None = None,
 ) -> ThreadingHTTPServer:
     if host not in {"127.0.0.1", "localhost"}:
         raise ValueError("Product Shell may bind only to the local loopback interface")
@@ -74,11 +78,37 @@ def make_server(
                     if "/" not in pack_id:
                         pack = promotion.packs.get(pack_id)
                         if pack is not None:
+                            lessons: tuple[tuple[str, str], ...] = ()
+                            if learning is not None:
+                                lessons = tuple(
+                                    (lesson.lesson_id, lesson.title)
+                                    for lesson in learning.available_lessons(
+                                        pack_id
+                                    )
+                                )
                             return (
                                 HTTPStatus.OK,
-                                _pack_detail(pack),
+                                _pack_detail(pack, lessons),
                                 "text/html; charset=utf-8",
                             )
+                if path.startswith("/learn/") and learning is not None:
+                    parts = path.strip("/").split("/")
+                    if len(parts) == 3:
+                        overview = learning.open_lesson(parts[1], parts[2])
+                        return (
+                            HTTPStatus.OK,
+                            lesson_overview(overview, self._csrf(path)),
+                            "text/html; charset=utf-8",
+                        )
+                if path.startswith("/attempts/") and learning is not None:
+                    parts = path.strip("/").split("/")
+                    if len(parts) == 2:
+                        view = learning.view(parts[1])
+                        return (
+                            HTTPStatus.OK,
+                            attempt_page(view, self._csrf(path)),
+                            "text/html; charset=utf-8",
+                        )
                 prefix = "/updates/"
                 if path.startswith(prefix) and "/" not in path[len(prefix) :]:
                     update = repository.get(path[len(prefix) :])
@@ -115,7 +145,7 @@ def make_server(
                         else _readonly_detail(update)
                     )
                     return HTTPStatus.OK, page, "text/html; charset=utf-8"
-            except StorageError:
+            except (StorageError, LearningError):
                 return self._not_found()
             except SchemaError:
                 return (
@@ -126,7 +156,7 @@ def make_server(
             return self._not_found()
 
         def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
-            if promotion is None:
+            if promotion is None and learning is None:
                 self._method_not_allowed()
                 return
             if not self._trusted_host():
@@ -146,6 +176,13 @@ def make_server(
                 return
             try:
                 fields = self._form()
+                if learning is not None and (
+                    path.startswith("/learn/") or path.startswith("/attempts/")
+                ):
+                    self._handle_learning_post(path, fields)
+                    return
+                if promotion is None:
+                    raise PromotionError("Promotion is unavailable")
                 update_id, action = self._promotion_route(path)
                 if not hmac.compare_digest(
                     self._one(fields, "csrf-token"),
@@ -239,6 +276,7 @@ def make_server(
                 SchemaError,
                 StorageError,
                 PromotionError,
+                LearningError,
             ) as exc:
                 self._send(
                     HTTPStatus.BAD_REQUEST,
@@ -249,6 +287,103 @@ def make_server(
                         "<p>No changes were made.</p>",
                     ),
                 )
+
+        def _handle_learning_post(
+            self,
+            path: str,
+            fields: dict[str, list[str]],
+        ) -> None:
+            assert learning is not None
+            parts = path.strip("/").split("/")
+            if (
+                len(parts) == 4
+                and parts[0] == "learn"
+                and parts[3] == "begin"
+            ):
+                csrf_path = f"/learn/{parts[1]}/{parts[2]}"
+                self._require_csrf(fields, csrf_path)
+                view = learning.start(parts[1], parts[2])
+            elif (
+                len(parts) == 3
+                and parts[0] == "attempts"
+                and parts[2]
+                in {"map", "predict", "run", "reset", "prove", "explain"}
+            ):
+                attempt_id, action = parts[1], parts[2]
+                self._require_csrf(fields, f"/attempts/{attempt_id}")
+                if action == "map":
+                    view = learning.advance_map(attempt_id)
+                elif action == "predict":
+                    view = learning.predict(
+                        attempt_id,
+                        self._one(fields, "choice-id"),
+                        self._integer(fields, "confidence"),
+                    )
+                elif action == "run":
+                    view = learning.run_scenario(attempt_id)
+                elif action == "reset":
+                    view = learning.reset_scenario(attempt_id)
+                elif action == "prove":
+                    current = learning.view(attempt_id)
+                    decisions = tuple(
+                        EvidenceDecision(
+                            card.evidence_id,
+                            self._one(
+                                fields,
+                                f"evidence-{card.evidence_id}",
+                            ),
+                        )
+                        for card in current.lesson.evidence.cards
+                    )
+                    view = learning.prove(attempt_id, decisions)
+                else:
+                    view = learning.explain(
+                        attempt_id,
+                        mechanism_choice_id=self._one(
+                            fields,
+                            "mechanism-choice-id",
+                        ),
+                        text=self._one(fields, "explanation"),
+                        remaining_uncertainty=self._one(
+                            fields,
+                            "uncertainty",
+                        ),
+                        confidence_after=self._integer(
+                            fields,
+                            "confidence-after",
+                        ),
+                    )
+            else:
+                raise LearningError("unknown Learning route")
+            attempt = view.attempt
+            if attempt is None:
+                raise LearningError("Learning action did not create an attempt")
+            self.send_response(HTTPStatus.SEE_OTHER)
+            self.send_header("Location", f"/attempts/{attempt.attempt_id}")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def _require_csrf(
+            self,
+            fields: dict[str, list[str]],
+            path: str,
+        ) -> None:
+            if not hmac.compare_digest(
+                self._one(fields, "csrf-token"),
+                self._csrf(path),
+            ):
+                raise LearningError("CSRF token is invalid")
+
+        def _integer(
+            self,
+            fields: dict[str, list[str]],
+            name: str,
+        ) -> int:
+            try:
+                return int(self._one(fields, name))
+            except ValueError as exc:
+                raise LearningError(f"{name} must be an integer") from exc
 
         def do_PUT(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
             self._method_not_allowed()
@@ -359,7 +494,11 @@ def make_server(
 
         def _method_not_allowed(self) -> None:
             self.send_response(HTTPStatus.METHOD_NOT_ALLOWED)
-            allowed = "GET, HEAD, POST" if promotion is not None else "GET, HEAD"
+            allowed = (
+                "GET, HEAD, POST"
+                if promotion is not None or learning is not None
+                else "GET, HEAD"
+            )
             self.send_header("Allow", allowed)
             self.send_header("Content-Length", "0")
             self.send_header("Cache-Control", "no-store")

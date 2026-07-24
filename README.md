@@ -6,7 +6,7 @@ The first release is local-first. It captures source material into a private lea
 
 ## Current phase
 
-The first two tracers establish the capture, review, and Promotion boundary:
+The first vertical slice now reaches one complete evidence-centered lesson:
 
 ```text
 raw source -> private intake + provenance manifest
@@ -16,9 +16,10 @@ deterministic match -> immutable staged proposal -> explicit Promotion
                                                     |
                                                     v
                                          accepted Learning Pack
+                                                    |
+                                                    v
+                         Map -> Predict -> Try -> Prove -> Explain -> Review
 ```
-
-It does not yet begin a lesson.
 
 ## Product documentation
 
@@ -29,6 +30,7 @@ It does not yet begin a lesson.
 - [Staged Pack Update contract](docs/staged-update-contract.md)
 - [Promotion guide](docs/promotion.md)
 - [Accepted Learning Pack contract](docs/accepted-pack-contract.md)
+- [Evidence-centered lesson guide](docs/evidence-centered-lesson.md)
 - [Contributor and agent guidance](AGENTS.md)
 
 ## Requirements
@@ -57,8 +59,9 @@ opslearn serve --home /tmp/ops-learning-home --port 8000
 ```
 
 Open `http://127.0.0.1:8000/`. The shell reviews only the staged proposal, then
-requires a no-write preview and explicit confirmation before Promotion. It has
-no route for raw intake.
+requires a no-write preview and explicit confirmation before Promotion. After
+Promotion, the accepted Codex ETL pack opens one public synthetic lesson. The
+shell has no route for raw intake.
 
 In another terminal, the privacy check remains available:
 

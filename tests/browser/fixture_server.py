@@ -9,7 +9,9 @@ import tempfile
 from threading import Thread
 
 from ops_learning_lab.compiler import compile_update
+from ops_learning_lab.bundle_repository import BundleRepository
 from ops_learning_lab.domain import SourceReference
+from ops_learning_lab.learning_service import InMemoryAttemptStore, LearningService
 from ops_learning_lab.pack_repository import PackRepository
 from ops_learning_lab.promotion import PromotionService
 from ops_learning_lab.shell import make_server
@@ -48,11 +50,17 @@ def main() -> int:
             PackRepository.open(home.root),
             forbidden_canaries=(CANARY,),
         )
+        learning = LearningService(
+            service.packs,
+            BundleRepository.open(home.root),
+            InMemoryAttemptStore(),
+        )
         server = make_server(
             updates,
             "127.0.0.1",
             arguments.port,
             promotion=service,
+            learning=learning,
         )
 
         def stop(_signum, _frame) -> None:
