@@ -15,7 +15,7 @@ from .learning_bundle import (
     LearningPackBundle,
     LessonBlueprint,
     MapStage,
-    Prediction,
+    PredictionPrompt,
     ScenarioAction,
 )
 from .promotion_models import AcceptedPackSnapshot
@@ -81,7 +81,7 @@ def build_codex_etl_bundle(
                 "The result will show whether processing continued and what total was published.",
             ),
         ),
-        prediction=Prediction(
+        prediction=PredictionPrompt(
             prompt=(
                 "What happens when the non-blocking uniqueness rule sees the "
                 "duplicate?"
@@ -180,7 +180,7 @@ def build_codex_etl_bundle(
                 "remains uncertain."
             ),
             minimum_characters=24,
-            qualification=Prediction(
+            qualification=PredictionPrompt(
                 prompt="Which mechanism caused the observed downstream result?",
                 choices=(
                     Choice(

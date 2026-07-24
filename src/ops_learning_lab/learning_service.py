@@ -13,7 +13,7 @@ from .attempts import (
     AttemptCheckpoint,
     EvidenceDecision,
     Explanation,
-    Prediction,
+    PredictionResponse,
     RendererCheckpoint,
 )
 from .bundle_repository import BundleRepository
@@ -199,7 +199,7 @@ class LearningService:
         return self._save(previous, previous.evolve(
             updated_at=self.clock(),
             next_step="try",
-            prediction=Prediction(choice_id, confidence),
+            prediction=PredictionResponse(choice_id, confidence),
         ))
 
     def run_scenario(self, attempt_id: str) -> LearningView:
