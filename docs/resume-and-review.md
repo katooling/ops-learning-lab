@@ -84,6 +84,14 @@ reporting success. On a filesystem that cannot confirm directory `fsync`, this
 proves the event is visible and an exact command retry can recover it; it does
 not claim the event will survive a sudden host power loss.
 
+A read-only route projection may bind the same directory without taking writer
+authority. It snapshots directory names, ignores in-progress temporary files,
+and validates the complete hash-linked prefix it observed. Because committed
+events are immutable and appended atomically, a concurrent event is either
+fully present in that snapshot or considered on the next read. The projection
+has no learner-state mutation methods and does not weaken the Product Shell's
+single-writer lock.
+
 ## Reset means two different things
 
 | Action | Attempt ID | Seed | Recorded history |

@@ -8,6 +8,7 @@ from typing import Any, Protocol
 
 from .compiler import compile_update, propose_pack_match, validate_capture_text
 from .domain import SchemaError, SourceReference
+from .learner_state import LearnerHistory, LearnerStateError
 from .staging import PackUpdateRepository
 from .storage import LearningHome, StorageError
 
@@ -248,24 +249,62 @@ class LearningLaunchPort(Protocol):
     def open_or_resume(self, pack_id: str) -> LearningDestination: ...
 
 
-class ProductShellLearningPort:
-    """Current shell route adapter; durable resume can replace this one class."""
+class AttemptHistoryReadPort(Protocol):
+    """Read-only durable attempt projection used only for route selection."""
 
-    def __init__(self, learning) -> None:
+    def history(self) -> LearnerHistory: ...
+
+
+class ProductShellLearningPort:
+    """Choose one existing Product Shell lesson or durable active attempt."""
+
+    def __init__(
+        self,
+        learning,
+        attempts: AttemptHistoryReadPort,
+    ) -> None:
         self.learning = learning
+        self.attempts = attempts
 
     def open_or_resume(self, pack_id: str) -> LearningDestination:
         try:
             lessons = self.learning.available_lessons(pack_id)
-        except (SchemaError, StorageError, ValueError) as exc:
+            history = self.attempts.history()
+        except (
+            LearnerStateError,
+            SchemaError,
+            StorageError,
+            ValueError,
+        ) as exc:
             raise CodexImportError(
-                "Product Shell could not inspect the accepted lesson"
+                "Product Shell could not inspect the accepted lesson or history"
             ) from exc
         if len(lessons) != 1:
             raise CodexImportError(
                 "exactly one Product Shell lesson must be available for Learn Mode"
             )
         lesson = lessons[0]
+        active = tuple(
+            entry
+            for entry in history.attempts
+            if (
+                entry.status == "active"
+                and entry.attempt_kind == "learning"
+                and entry.checkpoint.pack_id == pack_id
+                and entry.checkpoint.lesson_id == lesson.lesson_id
+            )
+        )
+        if len(active) > 1:
+            raise CodexImportError(
+                "multiple active Learner Attempts match this pack and lesson"
+            )
+        if active:
+            attempt_id = active[0].checkpoint.attempt_id
+            return LearningDestination(
+                path=f"/attempts/{attempt_id}",
+                disposition="resumed",
+                attempt_id=attempt_id,
+            )
         return LearningDestination(
             path=f"/learn/{pack_id}/{lesson.lesson_id}",
             disposition="opened",
