@@ -15,7 +15,9 @@ from .learning_bundle import LearningPackBundle, LessonBlueprint
 
 EVALUATION_SCHEMA_VERSION = 1
 ATTEMPT_RECORD_SCHEMA_VERSION = 1
-MASTERY_STATES = frozenset({"captured", "introduced", "demonstrated"})
+MASTERY_STATES = frozenset(
+    {"captured", "introduced", "demonstrated", "retained"}
+)
 
 
 def _canonical_sha256(value: dict[str, Any]) -> str:

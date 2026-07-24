@@ -11,7 +11,8 @@ from threading import Thread
 from ops_learning_lab.compiler import compile_update
 from ops_learning_lab.bundle_repository import BundleRepository
 from ops_learning_lab.domain import SourceReference
-from ops_learning_lab.learning_service import InMemoryAttemptStore, LearningService
+from ops_learning_lab.learner_state import EventAttemptStore
+from ops_learning_lab.learning_service import LearningService
 from ops_learning_lab.pack_repository import PackRepository
 from ops_learning_lab.promotion import PromotionService
 from ops_learning_lab.shell import make_server
@@ -53,7 +54,7 @@ def main() -> int:
         learning = LearningService(
             service.packs,
             BundleRepository.open(home.root),
-            InMemoryAttemptStore(),
+            EventAttemptStore.open(home.root),
         )
         server = make_server(
             updates,

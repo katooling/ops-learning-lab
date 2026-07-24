@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from .domain import SchemaError
 from .attempts import EvidenceDecision
 from .learning_service import LearningError, LearningService
+from .learner_state import LearnerStateError
 from .lesson_views import attempt_page, lesson_overview
 from .promotion import PromotionService
 from .promotion_models import PromotionError, PromotionPlan, StalePromotionError
@@ -145,6 +146,17 @@ def make_server(
                         else _readonly_detail(update)
                     )
                     return HTTPStatus.OK, page, "text/html; charset=utf-8"
+            except LearnerStateError as exc:
+                return (
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    _layout(
+                        "Learner history needs repair",
+                        "<h1>Learner history needs repair</h1>"
+                        f'<aside class="error">{escape(str(exc))}</aside>'
+                        "<p>The valid history was not changed.</p>",
+                    ),
+                    "text/html; charset=utf-8",
+                )
             except (StorageError, LearningError):
                 return self._not_found()
             except SchemaError:
@@ -298,16 +310,28 @@ def make_server(
             if (
                 len(parts) == 4
                 and parts[0] == "learn"
-                and parts[3] == "begin"
+                and parts[3] in {"begin", "review"}
             ):
                 csrf_path = f"/learn/{parts[1]}/{parts[2]}"
                 self._require_csrf(fields, csrf_path)
-                view = learning.start(parts[1], parts[2])
+                view = (
+                    learning.start(parts[1], parts[2])
+                    if parts[3] == "begin"
+                    else learning.start_review(parts[1], parts[2])
+                )
             elif (
                 len(parts) == 3
                 and parts[0] == "attempts"
                 and parts[2]
-                in {"map", "predict", "run", "reset", "prove", "explain"}
+                in {
+                    "map",
+                    "predict",
+                    "run",
+                    "reset",
+                    "restart",
+                    "prove",
+                    "explain",
+                }
             ):
                 attempt_id, action = parts[1], parts[2]
                 self._require_csrf(fields, f"/attempts/{attempt_id}")
@@ -323,6 +347,8 @@ def make_server(
                     view = learning.run_scenario(attempt_id)
                 elif action == "reset":
                     view = learning.reset_scenario(attempt_id)
+                elif action == "restart":
+                    view = learning.restart_attempt(attempt_id)
                 elif action == "prove":
                     current = learning.view(attempt_id)
                     decisions = tuple(
