@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import http.client
 import json
 from pathlib import Path
@@ -457,6 +458,54 @@ class DurableLearningJourneyTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=2)
                 store.close()
+
+    def test_concurrent_due_review_requests_create_one_active_review(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = LearningHome.initialize(Path(directory) / "learning-home")
+            clock = MutableClock("2026-07-24T12:00:00Z")
+            next_id = iter(
+                (
+                    "attempt-11111111111111111111",
+                    "attempt-22222222222222222222",
+                    "attempt-33333333333333333333",
+                )
+            )
+            store = EventAttemptStore.open(home.root)
+            service = LearningService(
+                self.Packs(),
+                BundleRepository.open(home.root),
+                store,
+                clock=clock,
+                attempt_id_factory=lambda: next(next_id),
+            )
+            _complete_service_attempt(service)
+            clock.value = "2026-07-31T12:00:00Z"
+
+            def begin():
+                try:
+                    return service.start_review(
+                        "codex-etl",
+                        "lesson-codex-etl-quality",
+                    ).attempt.attempt_id
+                except LearningError as exc:
+                    return str(exc)
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = tuple(executor.map(lambda _: begin(), range(2)))
+
+            self.assertEqual(
+                sum(result.startswith("attempt-") for result in results),
+                1,
+            )
+            self.assertIn("Review is not due yet", results)
+            reviews = tuple(
+                entry
+                for entry in store.history().attempts
+                if entry.attempt_kind == "review"
+            )
+            self.assertEqual(len(reviews), 1)
+            self.assertEqual(reviews[0].status, "active")
+            store.close()
 
 
 class MutableClock:

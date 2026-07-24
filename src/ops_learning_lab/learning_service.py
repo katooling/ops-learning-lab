@@ -172,6 +172,7 @@ class LearningService:
         self.attempt_id_factory = attempt_id_factory or (
             lambda: f"attempt-{secrets.token_hex(10)}"
         )
+        self._review_lock = RLock()
 
     def open_lesson(self, pack_id: str, lesson_id: str) -> LearningView:
         """Read current accepted input without persisting a bundle or attempt."""
@@ -208,20 +209,21 @@ class LearningService:
         return self._start(pack_id, lesson_id, "learning", None)
 
     def start_review(self, pack_id: str, lesson_id: str) -> LearningView:
-        bundle = self._current_bundle(pack_id)
-        lesson = _lesson(bundle, lesson_id)
-        projection, _ = self._state(bundle)
-        if projection.review.status != "due":
-            raise LearningError("Review is not due yet")
-        source = projection.review.demonstrated_by_attempt_id
-        if source is None:
-            raise LearningError("Review has no demonstrated attempt")
-        return self._start(
-            pack_id,
-            lesson.lesson_id,
-            "review",
-            source,
-        )
+        with self._review_lock:
+            bundle = self._current_bundle(pack_id)
+            lesson = _lesson(bundle, lesson_id)
+            projection, _ = self._state(bundle)
+            if projection.review.status != "due":
+                raise LearningError("Review is not due yet")
+            source = projection.review.demonstrated_by_attempt_id
+            if source is None:
+                raise LearningError("Review has no demonstrated attempt")
+            return self._start(
+                pack_id,
+                lesson.lesson_id,
+                "review",
+                source,
+            )
 
     def _start(
         self,
