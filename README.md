@@ -6,7 +6,8 @@ The first release is local-first. It captures source material into a private lea
 
 ## Current phase
 
-The first vertical slice now reaches one complete evidence-centered lesson:
+The first vertical slice now persists one evidence-centered lesson through
+interruption and a later review:
 
 ```text
 raw source -> private intake + provenance manifest
@@ -19,6 +20,12 @@ deterministic match -> immutable staged proposal -> explicit Promotion
                                                     |
                                                     v
                          Map -> Predict -> Try -> Prove -> Explain -> Review
+                                                    |
+                                                    v
+                              private append-only attempt event history
+                                                    |
+                                                    v
+                                 scheduled later review -> Retained
 ```
 
 ## Product documentation
