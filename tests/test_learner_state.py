@@ -36,9 +36,13 @@ class BoundDirectoryAppendTests(unittest.TestCase):
             root = Path(directory) / "events"
             root.mkdir(mode=0o700)
             with _BoundDirectory.open(root, "event directory") as bound:
-                bound.atomic_create("0001.json", b'{"event":"first"}\n', 0o600)
+                bound.atomic_create_exclusive(
+                    "0001.json",
+                    b'{"event":"first"}\n',
+                    0o600,
+                )
                 with self.assertRaisesRegex(StorageError, "already exists"):
-                    bound.atomic_create(
+                    bound.atomic_create_exclusive(
                         "0001.json",
                         b'{"event":"replacement"}\n',
                         0o600,
