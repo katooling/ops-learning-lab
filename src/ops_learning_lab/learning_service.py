@@ -28,6 +28,7 @@ from .learning import (
 from .learner_state import (
     AttemptHistoryEntry,
     LearnerHistory,
+    LearnerStateError,
 )
 from .learning_bundle import LearningPackBundle, LessonBlueprint
 from .lesson_content import build_codex_etl_bundle
@@ -238,7 +239,9 @@ class LearningService:
                 )
             bundle = self.bundles.snapshot(bundle_sha256)
             if bundle is None:
-                raise LearningError("Review bundle snapshot is missing")
+                raise LearnerStateError(
+                    "learner history references a missing review bundle snapshot"
+                )
             lesson = _lesson(bundle, lesson_id)
             projection = project_learning_state(
                 bundle,
@@ -550,7 +553,9 @@ class LearningService:
     def _view(self, attempt: AttemptCheckpoint) -> LearningView:
         bundle = self.bundles.snapshot(attempt.bundle_sha256)
         if bundle is None:
-            raise LearningError("Learner Attempt bundle snapshot is missing")
+            raise LearnerStateError(
+                "learner history references a missing attempt bundle snapshot"
+            )
         lesson = _lesson(bundle, attempt.lesson_id)
         evaluation = (
             evaluate_attempt(bundle, attempt) if attempt.completed else None
@@ -623,7 +628,9 @@ class LearningService:
             seen.add(checkpoint.bundle_sha256)
             bundle = self.bundles.snapshot(checkpoint.bundle_sha256)
             if bundle is None:
-                raise LearningError("Learner Attempt bundle snapshot is missing")
+                raise LearnerStateError(
+                    "learner history references a missing review bundle snapshot"
+                )
             projection = project_learning_state(bundle, history, now).review
             if projection.status != "not-scheduled":
                 projections.append(projection)

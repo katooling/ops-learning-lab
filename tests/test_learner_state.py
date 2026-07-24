@@ -878,6 +878,38 @@ class DurableLearningJourneyTests(unittest.TestCase):
             )
             store.close()
 
+    def test_missing_historical_bundle_is_a_history_repair_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = LearningHome.initialize(Path(directory) / "learning-home")
+            bundles = BundleRepository.open(home.root)
+            store = EventAttemptStore.open(home.root)
+            service = LearningService(
+                self.Packs(),
+                bundles,
+                store,
+                clock=MutableClock("2026-07-24T12:00:00Z"),
+                attempt_id_factory=lambda: (
+                    "attempt-11111111111111111111"
+                ),
+            )
+            demonstrated = _complete_service_attempt(service)
+            snapshot = (
+                home.root
+                / "snapshots/learning-packs"
+                / f"{demonstrated.attempt.bundle_sha256}.json"
+            )
+            snapshot.unlink()
+
+            with self.assertRaisesRegex(
+                LearnerStateError,
+                "history references a missing",
+            ):
+                service.open_lesson(
+                    "codex-etl",
+                    "lesson-codex-etl-quality",
+                )
+            store.close()
+
     def test_product_shell_due_view_is_read_only_and_starts_exact_review(
         self,
     ) -> None:
