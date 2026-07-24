@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from threading import RLock
 
+from ._bound_directory import _BoundDirectory
 from .domain import SHA256_PATTERN, SchemaError
 from .json_contract import JsonContractError, decode_json_object
 from .learning_bundle import LearningPackBundle
 from .promotion_models import AcceptedPackSnapshot
-from .storage import StorageError, _read_confined_regular_file, _write_atomic
+from .storage import StorageError
 
 
 _BUNDLE_LOCK = RLock()
@@ -20,8 +20,9 @@ _BUNDLE_LOCK = RLock()
 class BundleRepository:
     """Persist public bundle snapshots without exposing any private store."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, directory: _BoundDirectory) -> None:
         self.root = root
+        self._directory = directory
 
     @classmethod
     def open(cls, learning_home: Path) -> BundleRepository:
@@ -46,44 +47,27 @@ class BundleRepository:
             ) from exc
         if root.is_symlink() or not root.is_dir():
             raise StorageError("Learning Pack snapshot directory is unsafe")
-        repository = cls(root)
-        repository._require_root()
-        return repository
+        return cls(
+            root,
+            _BoundDirectory.open(root, "Learning Pack snapshot directory"),
+        )
 
-    def _require_root(self) -> None:
-        if self.root.is_symlink() or not self.root.is_dir():
-            raise StorageError("Learning Pack snapshot directory is unsafe")
-        try:
-            resolved = self.root.resolve(strict=True)
-            snapshots = self.root.parent.resolve(strict=True)
-            resolved.relative_to(snapshots)
-        except (OSError, ValueError) as exc:
-            raise StorageError(
-                "Learning Pack snapshot directory escapes snapshots"
-            ) from exc
-
-    def _path(self, bundle_sha256: str) -> Path:
-        self._require_root()
+    def _leaf(self, bundle_sha256: str) -> str:
         if (
             not isinstance(bundle_sha256, str)
             or not SHA256_PATTERN.fullmatch(bundle_sha256)
         ):
             raise StorageError("bundle digest does not match the schema")
-        path = self.root / f"{bundle_sha256}.json"
-        if path.is_symlink():
-            raise StorageError("Learning Pack Bundle cannot be a symbolic link")
-        return path
+        return f"{bundle_sha256}.json"
 
     def get(self, bundle_sha256: str) -> LearningPackBundle | None:
-        path = self._path(bundle_sha256)
-        if not path.exists() and not path.is_symlink():
+        encoded = self._directory.read_regular(
+            self._leaf(bundle_sha256),
+            "Learning Pack Bundle",
+        )
+        if encoded is None:
             return None
         try:
-            encoded = _read_confined_regular_file(
-                path,
-                self.root,
-                "Learning Pack Bundle",
-            )
             return LearningPackBundle.from_dict(
                 decode_json_object(encoded, "Learning Pack Bundle")
             )
@@ -129,7 +113,7 @@ class BundleRepository:
     def save(self, bundle: LearningPackBundle) -> LearningPackBundle:
         if not isinstance(bundle, LearningPackBundle):
             raise SchemaError("bundle save requires a Learning Pack Bundle")
-        path = self._path(bundle.bundle_sha256)
+        leaf = self._leaf(bundle.bundle_sha256)
         encoded = (
             json.dumps(
                 bundle.to_dict(),
@@ -147,21 +131,14 @@ class BundleRepository:
                         "bundle digest collides with different content"
                     )
                 return existing
-            outcome = _write_atomic(path, encoded, 0o600)
+            outcome = self._directory.atomic_replace(leaf, encoded, 0o600)
             if not outcome.directory_synced:
-                visible = _read_confined_regular_file(
-                    path,
-                    self.root,
+                visible = self._directory.read_regular(
+                    leaf,
                     "Learning Pack Bundle",
                 )
                 if visible != encoded:
                     raise StorageError(
                         "Learning Pack Bundle replacement is uncertain"
                     )
-            try:
-                os.chmod(path, 0o600)
-            except OSError as exc:
-                raise StorageError(
-                    "Learning Pack Bundle permissions are uncertain"
-                ) from exc
         return bundle
