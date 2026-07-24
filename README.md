@@ -33,6 +33,7 @@ deterministic match -> immutable staged proposal -> explicit Promotion
 - [Evidence-centered lesson guide](docs/evidence-centered-lesson.md)
 - [Learning Pack Bundle contract](docs/learning-pack-bundle.md)
 - [Standalone export guide](docs/standalone-export.md)
+- [Resume and retained-mastery guide](docs/resume-and-review.md)
 - [Contributor and agent guidance](AGENTS.md)
 
 ## Requirements
