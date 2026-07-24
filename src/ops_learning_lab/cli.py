@@ -11,8 +11,8 @@ import stat
 import sys
 from typing import Sequence
 
-from .compiler import compile_update, validate_capture_text
 from .bundle_repository import BundleRepository
+from .compiler import compile_update, validate_capture_text
 from .domain import SchemaError, SourceReference
 from .export_repository import ExportRepository
 from .exporting import (
@@ -22,7 +22,6 @@ from .exporting import (
     StandaloneExporter,
 )
 from .json_contract import JsonContractError, decode_json_object
-from .learning_bundle import LearningPackBundle
 from .learning_service import InMemoryAttemptStore, LearningService
 from .pack_repository import PackRepository
 from .promotion import PromotionService
@@ -114,12 +113,10 @@ def _parser() -> argparse.ArgumentParser:
         "export", help="create one sanitized standalone Learning Pack"
     )
     export.add_argument("--home", type=Path, required=True)
-    export.add_argument("--pack-id", required=True)
     export.add_argument(
-        "--bundle",
-        type=Path,
+        "--bundle-sha256",
         required=True,
-        help="validated public Learning Pack Bundle JSON",
+        help="digest of a canonical stored Learning Pack Bundle",
     )
     export.add_argument(
         "--canary-file",
@@ -335,32 +332,31 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if arguments.command == "export":
-            root = arguments.home.expanduser()
-            if root.is_symlink() or not root.is_dir():
-                raise StorageError("public learning home is missing or unsafe")
-            root = root.resolve()
-            snapshot = PackRepository.open(root).snapshot(arguments.pack_id)
-            if snapshot is None:
-                raise StorageError("accepted Learning Pack does not exist")
-            bundle = LearningPackBundle.from_dict(
-                decode_json_object(
-                    _read_capture_input(arguments.bundle),
-                    "Learning Pack Bundle",
+            home = LearningHome.open(arguments.home)
+            with BundleRepository.open(home.root) as bundles:
+                bundle = bundles.snapshot(arguments.bundle_sha256)
+                if bundle is None:
+                    raise StorageError(
+                        "Learning Pack Bundle snapshot was not found"
+                    )
+                snapshot = PackRepository.open(home.root).snapshot(bundle.pack_id)
+                if snapshot is None:
+                    raise StorageError("accepted Learning Pack does not exist")
+                bundle = bundles.require_current(
+                    arguments.bundle_sha256,
+                    snapshot,
                 )
-            )
-            bundle.require_snapshot(snapshot)
             canaries = tuple(
                 _read_capture_input(path) for path in arguments.canary_file
             )
-            receipt = StandaloneExporter(
-                ExportRepository.open(root / "exports")
-            ).export(
-                bundle,
-                ExportPolicy(
-                    canaries,
-                    max_export_bytes=arguments.max_bytes,
-                ),
-            )
+            with ExportRepository.open(home.root / "exports") as exports:
+                receipt = StandaloneExporter(exports).export(
+                    bundle,
+                    ExportPolicy(
+                        canaries,
+                        max_export_bytes=arguments.max_bytes,
+                    ),
+                )
             _emit(receipt.to_dict())
             return 0
     except (
