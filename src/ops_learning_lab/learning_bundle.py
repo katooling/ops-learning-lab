@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from hashlib import sha256
 import json
 import re
@@ -27,6 +28,7 @@ REQUIRED_RENDERER_CAPABILITIES = frozenset(
         "keyboard-operable/v1",
     }
 )
+PUBLISHABLE_SENSITIVITY = frozenset({"public-synthetic", "sanitized"})
 
 
 def _identifier(value: Any, field: str) -> str:
@@ -50,6 +52,18 @@ def _positive_int(value: Any, field: str) -> int:
     ):
         raise SchemaError(f"{field} must be a positive integer")
     return value
+
+
+def _rfc3339(value: Any, field: str) -> str:
+    text = _text(value, field)
+    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise SchemaError(f"{field} must be an RFC 3339 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise SchemaError(f"{field} must include a timezone")
+    return text
 
 
 def _canonical_sha256(value: dict[str, Any]) -> str:
@@ -148,6 +162,7 @@ class ActivitySpec:
     scenario_id: str
     instructions: str
     seed: int
+    input_revision_sha256: str
     actions: tuple[ScenarioAction, ...]
     renderer_capabilities: tuple[str, ...]
 
@@ -155,6 +170,11 @@ class ActivitySpec:
         _identifier(self.scenario_id, "scenario_id")
         _text(self.instructions, "activity instructions")
         _positive_int(self.seed, "activity seed")
+        if (
+            not isinstance(self.input_revision_sha256, str)
+            or not SHA256_PATTERN.fullmatch(self.input_revision_sha256)
+        ):
+            raise SchemaError("activity input revision does not match the schema")
         _typed_non_empty_tuple(self.actions, ScenarioAction, "scenario actions")
         action_ids = tuple(action.action_id for action in self.actions)
         _unique(action_ids, "scenario action identifiers")
@@ -178,6 +198,7 @@ class ActivitySpec:
             "scenario_id": self.scenario_id,
             "instructions": self.instructions,
             "seed": self.seed,
+            "input_revision_sha256": self.input_revision_sha256,
             "actions": [action.to_dict() for action in self.actions],
             "renderer_capabilities": list(self.renderer_capabilities),
         }
@@ -190,6 +211,7 @@ class ActivitySpec:
                 "scenario_id",
                 "instructions",
                 "seed",
+                "input_revision_sha256",
                 "actions",
                 "renderer_capabilities",
             },
@@ -199,6 +221,7 @@ class ActivitySpec:
             scenario_id=fields["scenario_id"],
             instructions=fields["instructions"],
             seed=fields["seed"],
+            input_revision_sha256=fields["input_revision_sha256"],
             actions=_objects(fields["actions"], ScenarioAction.from_dict, "actions"),
             renderer_capabilities=_strings(
                 fields["renderer_capabilities"],
@@ -265,12 +288,21 @@ class EvidenceCard:
     title: str
     proves: str
     does_not_prove: str
+    source: str
+    scope: str
+    sensitivity: str
+    observed_at: str
 
     def __post_init__(self) -> None:
         _identifier(self.evidence_id, "evidence_id")
         _text(self.title, "evidence title")
         _text(self.proves, "evidence proves")
         _text(self.does_not_prove, "evidence does_not_prove")
+        _text(self.source, "evidence source")
+        _text(self.scope, "evidence scope")
+        if self.sensitivity not in PUBLISHABLE_SENSITIVITY:
+            raise SchemaError("evidence sensitivity is not publishable")
+        _rfc3339(self.observed_at, "evidence observed_at")
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -278,6 +310,10 @@ class EvidenceCard:
             "title": self.title,
             "proves": self.proves,
             "does_not_prove": self.does_not_prove,
+            "source": self.source,
+            "scope": self.scope,
+            "sensitivity": self.sensitivity,
+            "observed_at": self.observed_at,
         }
 
     @classmethod
@@ -285,7 +321,16 @@ class EvidenceCard:
         return cls(
             **_exact_object(
                 value,
-                {"evidence_id", "title", "proves", "does_not_prove"},
+                {
+                    "evidence_id",
+                    "title",
+                    "proves",
+                    "does_not_prove",
+                    "source",
+                    "scope",
+                    "sensitivity",
+                    "observed_at",
+                },
                 "evidence card",
             )
         )
@@ -312,6 +357,8 @@ class EvidenceExercise:
             raise SchemaError("required reject references missing evidence")
         if set(self.required_support).intersection(self.required_reject):
             raise SchemaError("evidence cannot be both required and rejected")
+        if set(self.required_support).union(self.required_reject) != known:
+            raise SchemaError("every evidence card needs an explicit verdict")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -339,35 +386,73 @@ class EvidenceExercise:
 @dataclass(frozen=True, slots=True)
 class ExplanationPrompt:
     prompt: str
-    required_concepts: tuple[str, ...]
     minimum_characters: int
+    qualification: Prediction
 
     def __post_init__(self) -> None:
         _text(self.prompt, "explanation prompt")
-        _non_empty_unique_strings(self.required_concepts, "required concepts")
         _positive_int(self.minimum_characters, "minimum_characters")
+        if not isinstance(self.qualification, Prediction):
+            raise SchemaError("explanation qualification does not match the schema")
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "prompt": self.prompt,
-            "required_concepts": list(self.required_concepts),
             "minimum_characters": self.minimum_characters,
+            "qualification": self.qualification.to_dict(),
         }
 
     @classmethod
     def from_dict(cls, value: Any) -> ExplanationPrompt:
         fields = _exact_object(
             value,
-            {"prompt", "required_concepts", "minimum_characters"},
+            {"prompt", "minimum_characters", "qualification"},
             "explanation prompt",
         )
         return cls(
             prompt=fields["prompt"],
-            required_concepts=_strings(
-                fields["required_concepts"],
-                "required concepts",
-            ),
             minimum_characters=fields["minimum_characters"],
+            qualification=Prediction.from_dict(fields["qualification"]),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class LearningOutcome:
+    outcome_id: str
+    statement: str
+    outcome_revision_sha256: str
+
+    def __post_init__(self) -> None:
+        _identifier(self.outcome_id, "outcome_id")
+        _text(self.statement, "outcome statement")
+        expected = _canonical_sha256(
+            {"outcome_id": self.outcome_id, "statement": self.statement}
+        )
+        if self.outcome_revision_sha256 != expected:
+            raise SchemaError("outcome revision digest does not match its content")
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "outcome_id": self.outcome_id,
+            "statement": self.statement,
+            "outcome_revision_sha256": self.outcome_revision_sha256,
+        }
+
+    @classmethod
+    def build(cls, outcome_id: str, statement: str) -> LearningOutcome:
+        digest = _canonical_sha256(
+            {"outcome_id": outcome_id, "statement": statement}
+        )
+        return cls(outcome_id, statement, digest)
+
+    @classmethod
+    def from_dict(cls, value: Any) -> LearningOutcome:
+        return cls(
+            **_exact_object(
+                value,
+                {"outcome_id", "statement", "outcome_revision_sha256"},
+                "learning outcome",
+            )
         )
 
 
@@ -377,11 +462,13 @@ class LessonBlueprint:
     title: str
     concept_id: str
     claim_id: str
+    outcome: LearningOutcome
     map_stages: tuple[MapStage, ...]
     prediction: Prediction
     activity: ActivitySpec
     evidence: EvidenceExercise
     explanation: ExplanationPrompt
+    lesson_revision_sha256: str
 
     def __post_init__(self) -> None:
         _identifier(self.lesson_id, "lesson_id")
@@ -391,6 +478,8 @@ class LessonBlueprint:
             self.claim_id
         ):
             raise SchemaError("lesson claim_id does not match the schema")
+        if not isinstance(self.outcome, LearningOutcome):
+            raise SchemaError("lesson outcome does not match the schema")
         _typed_non_empty_tuple(self.map_stages, MapStage, "map stages")
         _unique(
             tuple(stage.stage_id for stage in self.map_stages),
@@ -404,19 +493,69 @@ class LessonBlueprint:
             raise SchemaError("lesson evidence does not match the schema")
         if not isinstance(self.explanation, ExplanationPrompt):
             raise SchemaError("lesson explanation does not match the schema")
+        if self.lesson_revision_sha256 != _canonical_sha256(self._content_dict()):
+            raise SchemaError("lesson revision digest does not match its content")
 
-    def to_dict(self) -> dict[str, Any]:
+    def _content_dict(self) -> dict[str, Any]:
         return {
             "lesson_id": self.lesson_id,
             "title": self.title,
             "concept_id": self.concept_id,
             "claim_id": self.claim_id,
+            "outcome": self.outcome.to_dict(),
             "map_stages": [stage.to_dict() for stage in self.map_stages],
             "prediction": self.prediction.to_dict(),
             "activity": self.activity.to_dict(),
             "evidence": self.evidence.to_dict(),
             "explanation": self.explanation.to_dict(),
         }
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **self._content_dict(),
+            "lesson_revision_sha256": self.lesson_revision_sha256,
+        }
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        lesson_id: str,
+        title: str,
+        concept_id: str,
+        claim_id: str,
+        outcome: LearningOutcome,
+        map_stages: tuple[MapStage, ...],
+        prediction: Prediction,
+        activity: ActivitySpec,
+        evidence: EvidenceExercise,
+        explanation: ExplanationPrompt,
+    ) -> LessonBlueprint:
+        content = {
+            "lesson_id": lesson_id,
+            "title": title,
+            "concept_id": concept_id,
+            "claim_id": claim_id,
+            "outcome": outcome.to_dict(),
+            "map_stages": [stage.to_dict() for stage in map_stages],
+            "prediction": prediction.to_dict(),
+            "activity": activity.to_dict(),
+            "evidence": evidence.to_dict(),
+            "explanation": explanation.to_dict(),
+        }
+        return cls(
+            lesson_id=lesson_id,
+            title=title,
+            concept_id=concept_id,
+            claim_id=claim_id,
+            outcome=outcome,
+            map_stages=map_stages,
+            prediction=prediction,
+            activity=activity,
+            evidence=evidence,
+            explanation=explanation,
+            lesson_revision_sha256=_canonical_sha256(content),
+        )
 
     @classmethod
     def from_dict(cls, value: Any) -> LessonBlueprint:
@@ -427,11 +566,13 @@ class LessonBlueprint:
                 "title",
                 "concept_id",
                 "claim_id",
+                "outcome",
                 "map_stages",
                 "prediction",
                 "activity",
                 "evidence",
                 "explanation",
+                "lesson_revision_sha256",
             },
             "lesson",
         )
@@ -440,6 +581,7 @@ class LessonBlueprint:
             title=fields["title"],
             concept_id=fields["concept_id"],
             claim_id=fields["claim_id"],
+            outcome=LearningOutcome.from_dict(fields["outcome"]),
             map_stages=_objects(
                 fields["map_stages"],
                 MapStage.from_dict,
@@ -449,6 +591,7 @@ class LessonBlueprint:
             activity=ActivitySpec.from_dict(fields["activity"]),
             evidence=EvidenceExercise.from_dict(fields["evidence"]),
             explanation=ExplanationPrompt.from_dict(fields["explanation"]),
+            lesson_revision_sha256=fields["lesson_revision_sha256"],
         )
 
 
@@ -501,8 +644,6 @@ class LearningPackBundle:
                 raise SchemaError("lesson references a missing concept")
             if lesson.claim_id not in claim_ids:
                 raise SchemaError("lesson references a missing accepted claim")
-            if not set(lesson.explanation.required_concepts).issubset(concept_ids):
-                raise SchemaError("explanation references a missing concept")
         expected = _canonical_sha256(self._content_dict())
         if (
             not isinstance(self.bundle_sha256, str)
