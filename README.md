@@ -6,16 +6,19 @@ The first release is local-first. It captures source material into a private lea
 
 ## Current phase
 
-The first tracer establishes the capture and review boundary:
+The first two tracers establish the capture, review, and Promotion boundary:
 
 ```text
 raw source -> private intake + provenance manifest
         |       (unmarked raw lines stay private)
         v
-deterministic match -> immutable staged proposal -> local review shell
+deterministic match -> immutable staged proposal -> explicit Promotion
+                                                    |
+                                                    v
+                                         accepted Learning Pack
 ```
 
-It does not yet promote content or begin a lesson.
+It does not yet begin a lesson.
 
 ## Product documentation
 
@@ -24,6 +27,8 @@ It does not yet promote content or begin a lesson.
 - [Architecture decisions](docs/adr/)
 - [Capture Mode guide](docs/capture-mode.md)
 - [Staged Pack Update contract](docs/staged-update-contract.md)
+- [Promotion guide](docs/promotion.md)
+- [Accepted Learning Pack contract](docs/accepted-pack-contract.md)
 - [Contributor and agent guidance](AGENTS.md)
 
 ## Requirements
@@ -51,8 +56,9 @@ opslearn capture \
 opslearn serve --home /tmp/ops-learning-home --port 8000
 ```
 
-Open `http://127.0.0.1:8000/`. The shell shows only the staged proposal. It has
-no route for the raw intake.
+Open `http://127.0.0.1:8000/`. The shell reviews only the staged proposal, then
+requires a no-write preview and explicit confirmation before Promotion. It has
+no route for raw intake.
 
 In another terminal, the privacy check remains available:
 

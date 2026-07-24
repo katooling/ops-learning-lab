@@ -42,6 +42,11 @@ def _write_atomic(path: Path, data: bytes, mode: int) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         temporary.replace(path)
+        directory_descriptor = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
