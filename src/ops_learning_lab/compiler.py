@@ -158,12 +158,39 @@ def extract_claims(text: str, manifest: IntakeManifest) -> tuple[ProposedClaim, 
     return tuple(claims)
 
 
-def compile_update(content: bytes, manifest: IntakeManifest) -> StagedPackUpdate:
+def select_pack_match(match: PackMatch, pack_id: str) -> PackMatch:
+    """Record an explicit Learner choice in the immutable proposal."""
+
+    candidates = tuple(
+        candidate for candidate in match.candidates if candidate.pack_id == pack_id
+    )
+    if len(candidates) != 1:
+        raise SchemaError("selected pack is not one of the proposed Pack Matches")
+    candidate = candidates[0]
+    return PackMatch(
+        kind="selected",
+        candidates=(candidate,),
+        proposed_pack_id=candidate.pack_id,
+        reasons=(
+            f"Learner explicitly selected {candidate.title}.",
+            *match.reasons,
+        ),
+    )
+
+
+def compile_update(
+    content: bytes,
+    manifest: IntakeManifest,
+    *,
+    selected_pack_id: str | None = None,
+) -> StagedPackUpdate:
     try:
         text = content.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise SchemaError("Capture Mode accepts UTF-8 text only") from exc
     match = propose_pack_match(text)
+    if selected_pack_id is not None:
+        match = select_pack_match(match, selected_pack_id)
     claims = extract_claims(text, manifest)
     source = StagedSource(
         source_type=manifest.source.source_type,

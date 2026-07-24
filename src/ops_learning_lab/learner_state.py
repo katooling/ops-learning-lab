@@ -282,6 +282,92 @@ def _parse_time(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _read_event_snapshot(
+    events_directory: _BoundDirectory,
+) -> tuple[LearnerStateEvent, ...]:
+    """Read one immutable event-name snapshot while a writer may append."""
+
+    try:
+        names = []
+        for name in events_directory.list_names():
+            if name == EVENT_LOCK_FILE or EVENT_TEMP_FILE_PATTERN.fullmatch(
+                name
+            ):
+                continue
+            names.append(name)
+        names.sort()
+    except StorageError as exc:
+        raise LearnerStateError("cannot list learner event history") from exc
+    events: list[LearnerStateEvent] = []
+    for expected_sequence, name in enumerate(names, start=1):
+        match = EVENT_FILE_PATTERN.fullmatch(name)
+        if match is None:
+            raise LearnerStateError(
+                "learner event history contains an unexpected file"
+            )
+        if int(match.group("sequence")) != expected_sequence:
+            raise LearnerStateError("learner event sequence has a gap")
+        encoded = events_directory.read_regular(name, "learner event")
+        if encoded is None:
+            raise LearnerStateError("learner event disappeared during replay")
+        try:
+            event = LearnerStateEvent.from_dict(
+                decode_json_object(encoded, "learner event")
+            )
+        except (JsonContractError, SchemaError) as exc:
+            raise LearnerStateError("learner event history is corrupt") from exc
+        if event.sequence != expected_sequence:
+            raise LearnerStateError("learner event sequence is corrupt")
+        if match.group("short") != event.event_sha256[:20]:
+            raise LearnerStateError("learner event filename is corrupt")
+        expected_previous = events[-1].event_sha256 if events else None
+        if event.previous_event_sha256 != expected_previous:
+            raise LearnerStateError("learner event hash chain is corrupt")
+        if events and _parse_time(event.occurred_at) < _parse_time(
+            events[-1].occurred_at
+        ):
+            raise LearnerStateError("learner event chronology is corrupt")
+        if any(prior.command_id == event.command_id for prior in events):
+            raise LearnerStateError("learner command_id is duplicated")
+        events.append(event)
+    return tuple(events)
+
+
+class EventAttemptHistoryReader:
+    """Descriptor-bound history projection with no writer capability."""
+
+    def __init__(self, events: _BoundDirectory) -> None:
+        self._events = events
+        self._lock = RLock()
+
+    @classmethod
+    def open(cls, home: str | Path) -> EventAttemptHistoryReader:
+        root = Path(home).expanduser().resolve()
+        try:
+            events = _BoundDirectory.open(
+                root / LEARNER_EVENT_DIRECTORY,
+                "learner event directory",
+                private=True,
+            )
+        except StorageError as exc:
+            raise LearnerStateError(str(exc)) from exc
+        return cls(events)
+
+    def history(self) -> LearnerHistory:
+        with self._lock:
+            return EventAttemptStore._replay(_read_event_snapshot(self._events))
+
+    def close(self) -> None:
+        with self._lock:
+            self._events.close()
+
+    def __enter__(self) -> EventAttemptHistoryReader:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+
 class EventAttemptStore:
     """One private append-only event stream with fail-closed replay."""
 
@@ -339,6 +425,12 @@ class EventAttemptStore:
                 os.close(self._lock_descriptor)
                 self._lock_descriptor = -1
             self._events.close()
+
+    def __enter__(self) -> EventAttemptStore:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
 
     def get(self, attempt_id: str) -> AttemptCheckpoint | None:
         entry = self.history().get(attempt_id)
@@ -600,53 +692,7 @@ class EventAttemptStore:
         return event
 
     def _read_events(self) -> tuple[LearnerStateEvent, ...]:
-        try:
-            names = []
-            for name in self._events.list_names():
-                if name == EVENT_LOCK_FILE or EVENT_TEMP_FILE_PATTERN.fullmatch(
-                    name
-                ):
-                    continue
-                names.append(name)
-            names.sort()
-        except StorageError as exc:
-            raise LearnerStateError("cannot list learner event history") from exc
-        events: list[LearnerStateEvent] = []
-        for expected_sequence, name in enumerate(names, start=1):
-            match = EVENT_FILE_PATTERN.fullmatch(name)
-            if match is None:
-                raise LearnerStateError(
-                    "learner event history contains an unexpected file"
-                )
-            if int(match.group("sequence")) != expected_sequence:
-                raise LearnerStateError("learner event sequence has a gap")
-            encoded = self._events.read_regular(name, "learner event")
-            if encoded is None:
-                raise LearnerStateError("learner event disappeared during replay")
-            try:
-                event = LearnerStateEvent.from_dict(
-                    decode_json_object(encoded, "learner event")
-                )
-            except (JsonContractError, SchemaError) as exc:
-                raise LearnerStateError("learner event history is corrupt") from exc
-            if event.sequence != expected_sequence:
-                raise LearnerStateError("learner event sequence is corrupt")
-            if match.group("short") != event.event_sha256[:20]:
-                raise LearnerStateError("learner event filename is corrupt")
-            expected_previous = events[-1].event_sha256 if events else None
-            if event.previous_event_sha256 != expected_previous:
-                raise LearnerStateError("learner event hash chain is corrupt")
-            if events and _parse_time(event.occurred_at) < _parse_time(
-                events[-1].occurred_at
-            ):
-                raise LearnerStateError("learner event chronology is corrupt")
-            if any(
-                prior.command_id == event.command_id
-                for prior in events
-            ):
-                raise LearnerStateError("learner command_id is duplicated")
-            events.append(event)
-        return tuple(events)
+        return _read_event_snapshot(self._events)
 
     @staticmethod
     def _replay(

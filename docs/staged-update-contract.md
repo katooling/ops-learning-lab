@@ -45,7 +45,9 @@ It is not canonical Learning Pack state. Version one does not yet persist an
 accepted pack artifact, so both expected-base fields are `null`. Promotion must
 resolve or create the real target pack and bind its own decision to that
 canonical state. Once a persisted pack exists, both expected-base fields must
-be present together. An ambiguous match has no selected target.
+be present together. An ambiguous match has no selected target. When the
+Learner explicitly chooses one ambiguous candidate, a new immutable proposal
+records a `selected` match with exactly that candidate and proposed target.
 
 ## Strict JSON
 

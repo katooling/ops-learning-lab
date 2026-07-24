@@ -11,6 +11,13 @@ import stat
 import sys
 from typing import Sequence
 
+from .codex_import import (
+    CodexImportError,
+    CodexImportRequest,
+    CodexImportService,
+    MAX_IMPORT_BYTES,
+    ProductShellLearningPort,
+)
 from .bundle_repository import BundleRepository
 from .compiler import compile_update, validate_capture_text
 from .domain import SchemaError, SourceReference
@@ -22,8 +29,8 @@ from .exporting import (
     StandaloneExporter,
 )
 from .json_contract import JsonContractError, decode_json_object
-from .learner_state import EventAttemptStore
-from .learning_service import LearningService
+from .learner_state import EventAttemptHistoryReader, EventAttemptStore
+from .learning_service import InMemoryAttemptStore, LearningService
 from .pack_repository import PackRepository
 from .publishable_home import PublishableHome
 from .promotion import PromotionService
@@ -57,6 +64,12 @@ def _parser() -> argparse.ArgumentParser:
     capture.add_argument("--source-id", required=True)
     capture.add_argument("--observed-at", default=None)
     capture.add_argument("--input", type=Path, required=True)
+
+    codex_import = subcommands.add_parser(
+        "codex-import",
+        help="explicitly import one strict-JSON Codex learning request from stdin",
+    )
+    codex_import.add_argument("--home", type=Path, required=True)
 
     audit = subcommands.add_parser(
         "audit-privacy", help="prove canary bytes are absent from publishable areas"
@@ -243,6 +256,42 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0
 
+        if arguments.command == "codex-import":
+            encoded = sys.stdin.buffer.read(MAX_IMPORT_BYTES + 1)
+            if len(encoded) > MAX_IMPORT_BYTES:
+                raise StorageError(
+                    f"Codex import exceeds the {MAX_IMPORT_BYTES}-byte safety limit"
+                )
+            request = CodexImportRequest.from_dict(
+                decode_json_object(encoded, "Codex import request")
+            )
+            home = LearningHome.open(arguments.home)
+            if request.mode == "capture":
+                result = CodexImportService(home).run(request)
+            else:
+                history = EventAttemptHistoryReader.open(home.root)
+                bundles: BundleRepository | None = None
+                try:
+                    bundles = BundleRepository.open(home.root)
+                    learning = LearningService(
+                        PackRepository.open(home.root),
+                        bundles,
+                        InMemoryAttemptStore(),
+                    )
+                    result = CodexImportService(
+                        home,
+                        learning_port=ProductShellLearningPort(
+                            learning,
+                            history,
+                        ),
+                    ).run(request)
+                finally:
+                    if bundles is not None:
+                        bundles.close()
+                    history.close()
+            _emit(result)
+            return 0
+
         if arguments.command == "audit-privacy":
             home = LearningHome.open(arguments.home)
             leaks = home.audit_canary(arguments.canary_file.read_bytes())
@@ -258,27 +307,35 @@ def main(argv: Sequence[str] | None = None) -> int:
             home = LearningHome.open(arguments.home)
             repository = PackUpdateRepository.open(home.root)
             service = _promotion_service(home, arguments.forbidden_canary_file)
-            learning = LearningService(
-                service.packs,
-                BundleRepository.open(home.root),
-                EventAttemptStore.open(home.root),
-            )
-            server = make_server(
-                repository,
-                arguments.host,
-                arguments.port,
-                promotion=service,
-                learning=learning,
-            )
-            host, port = server.server_address[:2]
-            _emit({"status": "serving", "url": f"http://{host}:{port}/"})
-            sys.stdout.flush()
+            attempts = EventAttemptStore.open(home.root)
+            bundles: BundleRepository | None = None
+            server = None
             try:
+                bundles = BundleRepository.open(home.root)
+                learning = LearningService(
+                    service.packs,
+                    bundles,
+                    attempts,
+                )
+                server = make_server(
+                    repository,
+                    arguments.host,
+                    arguments.port,
+                    promotion=service,
+                    learning=learning,
+                )
+                host, port = server.server_address[:2]
+                _emit({"status": "serving", "url": f"http://{host}:{port}/"})
+                sys.stdout.flush()
                 server.serve_forever()
             except KeyboardInterrupt:
                 pass
             finally:
-                server.server_close()
+                if server is not None:
+                    server.server_close()
+                if bundles is not None:
+                    bundles.close()
+                attempts.close()
             return 0
 
         if arguments.command == "promotion-review":
@@ -403,6 +460,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
     except (
         OSError,
+        CodexImportError,
         JsonContractError,
         SchemaError,
         StorageError,

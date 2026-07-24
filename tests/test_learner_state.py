@@ -14,6 +14,7 @@ from urllib.parse import urlencode
 from ops_learning_lab._bound_directory import _BoundDirectory
 from ops_learning_lab.attempts import EvidenceDecision
 from ops_learning_lab.learner_state import (
+    EventAttemptHistoryReader,
     EventAttemptStore,
     LearnerStateError,
     LearnerStateEvent,
@@ -219,6 +220,31 @@ class AppendOnlyLearnerHistoryTests(unittest.TestCase):
 
             reopened = EventAttemptStore.open(home.root)
             reopened.close()
+
+    def test_read_only_history_tracks_atomic_appends_while_writer_is_open(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = LearningHome.initialize(Path(directory) / "learning-home")
+            writer = EventAttemptStore.open(home.root)
+            reader = EventAttemptHistoryReader.open(home.root)
+            try:
+                self.assertEqual(reader.history().attempts, ())
+                initial = _initial_checkpoint(completed_attempt())
+
+                writer.save(initial, expected_checkpoint_sha256=None)
+
+                history = reader.history()
+                self.assertEqual(len(history.attempts), 1)
+                self.assertEqual(
+                    history.attempts[0].checkpoint.attempt_id,
+                    initial.attempt_id,
+                )
+                self.assertEqual(history.attempts[0].status, "active")
+                self.assertFalse(hasattr(reader, "save"))
+            finally:
+                reader.close()
+                writer.close()
 
     def test_removing_legacy_lock_leaf_cannot_create_a_second_writer(
         self,
