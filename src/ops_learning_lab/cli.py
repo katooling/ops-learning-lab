@@ -13,6 +13,10 @@ from typing import Sequence
 
 from .compiler import compile_update, validate_capture_text
 from .domain import SchemaError, SourceReference
+from .json_contract import JsonContractError, decode_json_object
+from .pack_repository import PackRepository
+from .promotion import PromotionService
+from .promotion_models import PromotionError, StalePromotionError
 from .shell import make_server
 from .staging import PackUpdateRepository
 from .storage import LearningHome, StorageError
@@ -55,6 +59,46 @@ def _parser() -> argparse.ArgumentParser:
     serve.add_argument("--home", type=Path, required=True)
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument(
+        "--forbidden-canary-file",
+        type=Path,
+        action="append",
+        default=[],
+        help="block exact UTF-8 canary text from accepted pack state",
+    )
+
+    review = subcommands.add_parser(
+        "promotion-review", help="inspect one immutable staged update and pack base"
+    )
+    review.add_argument("--home", type=Path, required=True)
+    review.add_argument("--update-id", required=True)
+    review.add_argument("--target-pack-id", default=None)
+    review.add_argument("--target-pack-title", default=None)
+
+    preview = subcommands.add_parser(
+        "promotion-preview", help="validate a Promotion plan without writing"
+    )
+    preview.add_argument("--home", type=Path, required=True)
+    preview.add_argument("--plan", type=Path, required=True)
+    preview.add_argument(
+        "--forbidden-canary-file",
+        type=Path,
+        action="append",
+        default=[],
+    )
+
+    promote = subcommands.add_parser(
+        "promotion-commit", help="atomically commit a previously previewed plan"
+    )
+    promote.add_argument("--home", type=Path, required=True)
+    promote.add_argument("--plan", type=Path, required=True)
+    promote.add_argument("--preview-sha256", required=True)
+    promote.add_argument(
+        "--forbidden-canary-file",
+        type=Path,
+        action="append",
+        default=[],
+    )
     return parser
 
 
@@ -88,6 +132,31 @@ def _read_capture_input(path: Path) -> bytes:
             f"capture input exceeds the {MAX_CAPTURE_BYTES}-byte safety limit"
         )
     return content
+
+
+def _promotion_service(
+    home: LearningHome,
+    canary_files: Sequence[Path] = (),
+) -> PromotionService:
+    canaries: list[str] = []
+    for path in canary_files:
+        try:
+            canary = _read_capture_input(path).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise StorageError("forbidden canary files must be UTF-8") from exc
+        if not canary:
+            raise StorageError("forbidden canary files must not be empty")
+        canaries.append(canary)
+    return PromotionService(
+        PackUpdateRepository.open(home.root),
+        PackRepository.open(home.root),
+        forbidden_canaries=tuple(canaries),
+    )
+
+
+def _read_plan(service: PromotionService, path: Path):
+    encoded = _read_capture_input(path)
+    return service.plan_from_dict(decode_json_object(encoded, "Promotion plan"))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -144,7 +213,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.command == "serve":
             home = LearningHome.open(arguments.home)
             repository = PackUpdateRepository.open(home.root)
-            server = make_server(repository, arguments.host, arguments.port)
+            service = _promotion_service(home, arguments.forbidden_canary_file)
+            server = make_server(
+                repository,
+                arguments.host,
+                arguments.port,
+                promotion=service,
+            )
             host, port = server.server_address[:2]
             _emit({"status": "serving", "url": f"http://{host}:{port}/"})
             sys.stdout.flush()
@@ -155,7 +230,78 @@ def main(argv: Sequence[str] | None = None) -> int:
             finally:
                 server.server_close()
             return 0
-    except (OSError, SchemaError, StorageError, ValueError) as exc:
+
+        if arguments.command == "promotion-review":
+            home = LearningHome.open(arguments.home)
+            review = _promotion_service(home).review(
+                arguments.update_id,
+                target_pack_id=arguments.target_pack_id,
+                target_pack_title=arguments.target_pack_title,
+            )
+            _emit(
+                {
+                    "status": "review",
+                    "update": review.update.to_dict(),
+                    "target_pack_id": review.target_pack_id,
+                    "target_pack_title": review.target_pack_title,
+                    "expected_base_version": review.expected_base_version,
+                    "expected_base_sha256": review.expected_base_sha256,
+                    "accepted_claims": (
+                        [claim.to_dict() for claim in review.current_pack.claims]
+                        if review.current_pack is not None
+                        else []
+                    ),
+                }
+            )
+            return 0
+
+        if arguments.command == "promotion-preview":
+            home = LearningHome.open(arguments.home)
+            service = _promotion_service(home, arguments.forbidden_canary_file)
+            plan = _read_plan(service, arguments.plan)
+            preview = service.preview(plan)
+            _emit(
+                {
+                    "status": "preview",
+                    "promotion_id": plan.promotion_id,
+                    "preview_sha256": preview.preview_sha256,
+                    "resulting_pack": preview.resulting_pack.to_dict(),
+                    "changes": {
+                        "removed": list(preview.changes.removed),
+                        "retained": list(preview.changes.retained),
+                        "generalized": list(preview.changes.generalized),
+                    },
+                    "written": False,
+                }
+            )
+            return 0
+
+        if arguments.command == "promotion-commit":
+            home = LearningHome.open(arguments.home)
+            service = _promotion_service(home, arguments.forbidden_canary_file)
+            plan = _read_plan(service, arguments.plan)
+            result = service.commit(plan, arguments.preview_sha256)
+            _emit(
+                {
+                    "status": "already-promoted"
+                    if result.already_applied
+                    else "promoted",
+                    "promotion_id": result.promotion.promotion_id,
+                    "pack_id": result.pack.pack_id,
+                    "pack_version": result.pack.version,
+                    "pack_sha256": result.pack.content_sha256,
+                }
+            )
+            return 0
+    except (
+        OSError,
+        JsonContractError,
+        SchemaError,
+        StorageError,
+        PromotionError,
+        StalePromotionError,
+        ValueError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     raise AssertionError(f"unhandled command: {arguments.command}")

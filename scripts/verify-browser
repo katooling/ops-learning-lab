@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+browser_root="$repo_root/tests/browser"
+
+if [ ! -d "$browser_root/node_modules/@playwright/test" ]; then
+  echo "browser dependencies are missing; run: npm --prefix tests/browser ci" >&2
+  exit 1
+fi
+
+npm --prefix "$browser_root" test

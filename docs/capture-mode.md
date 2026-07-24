@@ -69,7 +69,9 @@ Open `http://127.0.0.1:8000/`, then choose the staged update. The page shows:
 - categories of private material that were not copied.
 
 The server binds only to the local loopback interface. It has no raw-intake,
-file, static-directory, mutation, or lesson route.
+file, static-directory, or lesson route. Its only mutation is the explicit
+review, preview, and Promotion flow described in the
+[Promotion guide](promotion.md).
 
 ## What proves success
 

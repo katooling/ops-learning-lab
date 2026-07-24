@@ -34,6 +34,65 @@ def run_cli(*arguments: str) -> subprocess.CompletedProcess[str]:
 
 
 class PhaseOneCliTests(unittest.TestCase):
+    @staticmethod
+    def _fail_second_fsync():
+        real_fsync = os.fsync
+        calls = 0
+
+        def fail_directory_sync(descriptor):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("synthetic directory fsync failure")
+            return real_fsync(descriptor)
+
+        return fail_directory_sync
+
+    def test_initialize_succeeds_when_marker_is_visible_but_directory_sync_fails(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home_path = Path(directory) / "learning-home"
+            with mock.patch(
+                "ops_learning_lab.storage.os.fsync",
+                side_effect=self._fail_second_fsync(),
+            ):
+                home = LearningHome.initialize(home_path)
+
+            self.assertEqual(home.root, home_path.resolve())
+            self.assertEqual(
+                (home_path / ".ops-learning-lab-home").read_bytes(),
+                b'{"schema_version":1}\n',
+            )
+            self.assertEqual(LearningHome.open(home_path), home)
+
+    def test_capture_succeeds_when_raw_file_directory_sync_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = LearningHome.initialize(Path(directory) / "learning-home")
+            source = SourceReference(
+                source_type="pasted-text",
+                source_id="post-replace-sync",
+                observed_at="2026-07-24T12:00:00Z",
+            )
+            content = b"safe source after visible replace\n"
+            with mock.patch(
+                "ops_learning_lab.storage.os.fsync",
+                side_effect=self._fail_second_fsync(),
+            ):
+                manifest = home.capture(content, source)
+
+            self.assertEqual(home.read_manifest(manifest.intake_id), manifest)
+            self.assertEqual(
+                (
+                    home.root
+                    / "private"
+                    / "inbox"
+                    / manifest.intake_id
+                    / manifest.raw_file
+                ).read_bytes(),
+                content,
+            )
+
     def test_capture_is_private_idempotent_and_auditable(self) -> None:
         canary = b"PRIVATE-CANARY-7a13d9c2\n"
         with tempfile.TemporaryDirectory() as directory:
