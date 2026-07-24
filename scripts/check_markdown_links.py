@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check that relative links in publishable Markdown resolve locally."""
+"""Check that relative file links in publishable Markdown resolve locally."""
 
 from __future__ import annotations
 
@@ -72,13 +72,16 @@ def main() -> int:
     try:
         broken = find_broken_links(ROOT)
     except (OSError, subprocess.CalledProcessError, UnicodeDecodeError) as exc:
-        print(f"Markdown link check failed: {exc}", file=sys.stderr)
+        print(f"Markdown relative-file link check failed: {exc}", file=sys.stderr)
         return 1
     if broken:
         for item in broken:
             print(item, file=sys.stderr)
         return 1
-    print(f"Markdown link check passed: {len(markdown_candidates(ROOT))} files")
+    print(
+        "Markdown relative-file link check passed: "
+        f"{len(markdown_candidates(ROOT))} files"
+    )
     return 0
 
 

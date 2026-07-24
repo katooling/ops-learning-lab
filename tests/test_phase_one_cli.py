@@ -10,7 +10,7 @@ import unittest
 from unittest import mock
 
 from ops_learning_lab.domain import SourceReference
-from ops_learning_lab.storage import LearningHome
+from ops_learning_lab.storage import LearningHome, StorageError
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -170,6 +170,22 @@ class PhaseOneCliTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 1)
             self.assertIn("permissions must be 0700", result.stderr)
+
+    def test_read_manifest_rejects_path_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = LearningHome.initialize(root / "learning-home")
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "manifest.json").write_text(
+                '{"schema_version": 1}\n',
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                StorageError, "intake_id does not match the schema"
+            ):
+                home.read_manifest("../../outside")
 
     def test_failed_staged_capture_leaves_no_partial_intake(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

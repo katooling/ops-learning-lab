@@ -11,7 +11,7 @@ import shutil
 import tempfile
 from typing import Iterable
 
-from .domain import IntakeManifest, SourceReference
+from .domain import ID_PATTERN, IntakeManifest, SourceReference
 
 
 MARKER_FILE = ".ops-learning-lab-home"
@@ -191,7 +191,18 @@ class LearningHome:
         return manifest
 
     def read_manifest(self, intake_id: str) -> IntakeManifest:
-        path = self.root / PRIVATE_INBOX / intake_id / "manifest.json"
+        if not isinstance(intake_id, str) or not ID_PATTERN.fullmatch(intake_id):
+            raise StorageError("intake_id does not match the schema")
+        inbox = self.root / PRIVATE_INBOX
+        _require_owned_private_directory(inbox, self.root, "private inbox")
+        intake = inbox / intake_id
+        if intake.is_symlink() or not intake.is_dir():
+            raise StorageError(f"cannot read manifest for {intake_id}")
+        try:
+            intake.resolve().relative_to(inbox.resolve())
+        except ValueError as exc:
+            raise StorageError("intake manifest escapes the private inbox") from exc
+        path = intake / "manifest.json"
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:

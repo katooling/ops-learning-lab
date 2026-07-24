@@ -55,7 +55,9 @@ The final command succeeds only when the source bytes are absent from `packs/`, 
 ./scripts/verify
 ```
 
-The verification command runs the black-box CLI tests, domain tests, Python compilation, and publication audit.
+The verification command runs the black-box CLI and domain tests, Python
+compilation, relative-file link checks, the publication audit, and a clean
+editable-install smoke test.
 
 ## Safety
 
