@@ -11,7 +11,8 @@ from threading import Thread
 from ops_learning_lab.compiler import compile_update
 from ops_learning_lab.bundle_repository import BundleRepository
 from ops_learning_lab.domain import SourceReference
-from ops_learning_lab.learning_service import InMemoryAttemptStore, LearningService
+from ops_learning_lab.learner_state import EventAttemptStore
+from ops_learning_lab.learning_service import LearningService
 from ops_learning_lab.pack_repository import PackRepository
 from ops_learning_lab.promotion import PromotionService
 from ops_learning_lab.shell import make_server
@@ -50,10 +51,28 @@ def main() -> int:
             PackRepository.open(home.root),
             forbidden_canaries=(CANARY,),
         )
+        attempt_store = EventAttemptStore.open(home.root)
+
+        def clock() -> str:
+            demonstrated = any(
+                entry.status == "completed"
+                and entry.attempt_kind == "learning"
+                and entry.completed_record is not None
+                and entry.completed_record.evaluation is not None
+                and entry.completed_record.evaluation.qualifies
+                for entry in attempt_store.history().attempts
+            )
+            return (
+                "2026-07-31T12:00:00Z"
+                if demonstrated
+                else "2026-07-24T12:00:00Z"
+            )
+
         learning = LearningService(
             service.packs,
             BundleRepository.open(home.root),
-            InMemoryAttemptStore(),
+            attempt_store,
+            clock=clock,
         )
         server = make_server(
             updates,

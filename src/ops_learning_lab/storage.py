@@ -20,6 +20,8 @@ from .json_contract import JsonContractError, decode_json_object
 MARKER_FILE = ".ops-learning-lab-home"
 PRIVATE_DIRECTORY = "private"
 PRIVATE_INBOX = Path(PRIVATE_DIRECTORY) / "inbox"
+LEARNER_STATE_DIRECTORY = Path(PRIVATE_DIRECTORY) / "learner-state"
+LEARNER_EVENT_DIRECTORY = LEARNER_STATE_DIRECTORY / "events"
 STAGED_DIRECTORY = "staged"
 STAGED_UPDATES = Path(STAGED_DIRECTORY) / "updates"
 PUBLIC_DIRECTORIES = ("packs", "snapshots", "exports")
@@ -141,6 +143,15 @@ class LearningHome:
         os.chmod(inbox, 0o700)
         _require_owned_private_directory(private, candidate, "private directory")
         _require_owned_private_directory(inbox, candidate, "private inbox")
+        for path, label in (
+            (candidate / LEARNER_STATE_DIRECTORY, "learner state directory"),
+            (candidate / LEARNER_EVENT_DIRECTORY, "learner event directory"),
+        ):
+            if path.is_symlink():
+                raise StorageError(f"{label} cannot be a symbolic link")
+            path.mkdir(exist_ok=True)
+            os.chmod(path, 0o700)
+            _require_owned_private_directory(path, candidate, label)
         staged = candidate / STAGED_DIRECTORY
         if staged.is_symlink():
             raise StorageError("staged directory cannot be a symbolic link")
