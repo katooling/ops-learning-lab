@@ -331,6 +331,7 @@ def render_activity(
 def render_scenario(
     scenario_id: str,
     seed: int,
+    input_revision_sha256: str,
     actions: tuple[str, ...],
 ) -> ActivityResult:
     """Resolve only the public built-in scenario and fail closed otherwise."""
@@ -339,4 +340,6 @@ def render_scenario(
         raise SchemaError("unknown synthetic scenario")
     if seed != CODEX_ETL_ACTIVITY.seed:
         raise SchemaError("scenario seed does not match the built-in revision")
+    if input_revision_sha256 != CODEX_ETL_ACTIVITY.input_sha256:
+        raise SchemaError("scenario input revision does not match the built-in input")
     return render_activity(CODEX_ETL_ACTIVITY, actions)
