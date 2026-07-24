@@ -76,6 +76,65 @@ class BoundDirectoryTests(unittest.TestCase):
             self.assertEqual(list(approved.iterdir()), [])
             self.assertEqual(list(displaced.iterdir()), [])
 
+    def test_existing_atomic_create_rechecks_binding_and_reports_real_sync(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            approved = Path(directory) / "approved"
+            approved.mkdir()
+            bound = _BoundDirectory.open(approved, "approved directory")
+            try:
+                bound.atomic_create("immutable.txt", b"first", 0o600)
+                with mock.patch.object(
+                    _BoundDirectory,
+                    "_sync_directory",
+                    return_value=False,
+                ):
+                    existing = bound.atomic_create(
+                        "immutable.txt",
+                        b"second",
+                        0o600,
+                    )
+                self.assertFalse(existing.created)
+                self.assertFalse(existing.directory_synced)
+                self.assertEqual(
+                    bound.read_regular("immutable.txt", "immutable artifact"),
+                    b"first",
+                )
+            finally:
+                bound.close()
+
+    def test_existing_atomic_create_fails_if_ancestor_changes_at_link(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            approved = root / "approved"
+            displaced = root / "approved-displaced"
+            approved.mkdir()
+            bound = _BoundDirectory.open(approved, "approved directory")
+            try:
+                bound.atomic_create("immutable.txt", b"first", 0o600)
+
+                def swap_then_report_existing(*_: object, **__: object) -> None:
+                    approved.rename(displaced)
+                    approved.mkdir()
+                    raise FileExistsError
+
+                with mock.patch(
+                    "ops_learning_lab._bound_directory.os.link",
+                    side_effect=swap_then_report_existing,
+                ):
+                    with self.assertRaisesRegex(
+                        StorageError,
+                        "changed after it was opened",
+                    ):
+                        bound.atomic_create("immutable.txt", b"second", 0o600)
+            finally:
+                bound.close()
+
+            self.assertEqual(list(approved.iterdir()), [])
+            self.assertEqual(
+                (displaced / "immutable.txt").read_bytes(),
+                b"first",
+            )
+
     def test_leaf_symlink_fifo_and_traversal_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
