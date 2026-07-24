@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   cpSync,
   mkdtempSync,
@@ -16,7 +17,6 @@ import { pathToFileURL } from "node:url";
 import { expect, test } from "@playwright/test";
 
 
-const CANARY = "release-private-canary-8f2c47c70dd1";
 const REPO = resolve(import.meta.dirname, "../..");
 const PYTHONPATH = `${join(REPO, "src")}:${REPO}`;
 
@@ -235,12 +235,23 @@ test("one private Codex extract becomes retained, portable public learning", asy
   const home = join(root, "learning-home");
   const portable = join(root, "portable");
   const canaryFile = join(root, "privacy-canary.txt");
+  const canary = `release-private-canary-${randomUUID()}`;
   const commandOutputs = [];
   const responseBodies = [];
   const shellLogs = [];
   const port = await availablePort();
   const origin = `http://127.0.0.1:${port}`;
-  writeFileSync(canaryFile, CANARY, { encoding: "utf8", mode: 0o600 });
+  writeFileSync(canaryFile, canary, { encoding: "utf8", mode: 0o600 });
+
+  const tracked = spawnSync("git", ["ls-files", "-z"], { cwd: REPO });
+  expect(tracked.status, tracked.stderr.toString("utf8")).toBe(0);
+  for (const relativePath of tracked.stdout.toString("utf8").split("\0")) {
+    if (relativePath !== "") {
+      expect(readFileSync(join(REPO, relativePath)).includes(Buffer.from(canary))).toBe(
+        false,
+      );
+    }
+  }
 
   page.on("response", (response) => {
     if (!response.url().startsWith(origin)) {
@@ -265,7 +276,7 @@ test("one private Codex extract becomes retained, portable public learning", asy
       turn_ids: ["turn-18", "turn-19"],
       observed_at: "2026-07-24T12:00:00Z",
       text: [
-        CANARY,
+        canary,
         "Codex ETL usage cost.",
         "Claim [current]: Synthetic normalized cost should be non-negative.",
       ].join("\n"),
@@ -423,18 +434,18 @@ test("one private Codex extract becomes retained, portable public learning", asy
       (directory) => allFiles(join(home, directory)),
     );
     for (const path of publishableFiles) {
-      expect(readFileSync(path).includes(Buffer.from(CANARY))).toBe(false);
+      expect(readFileSync(path).includes(Buffer.from(canary))).toBe(false);
     }
     expect(
       allFiles(join(home, "private")).some((path) =>
-        readFileSync(path).includes(Buffer.from(CANARY)),
+        readFileSync(path).includes(Buffer.from(canary)),
       ),
       "the canary must genuinely exist inside the private boundary",
     ).toBe(true);
-    expect(readFileSync(portableArtifact).includes(Buffer.from(CANARY))).toBe(false);
-    expect(commandOutputs.join("\n")).not.toContain(CANARY);
-    expect((await Promise.all(responseBodies)).join("\n")).not.toContain(CANARY);
-    expect(shellLogs.join("\n")).not.toContain(CANARY);
+    expect(readFileSync(portableArtifact).includes(Buffer.from(canary))).toBe(false);
+    expect(commandOutputs.join("\n")).not.toContain(canary);
+    expect((await Promise.all(responseBodies)).join("\n")).not.toContain(canary);
+    expect(shellLogs.join("\n")).not.toContain(canary);
   } finally {
     await page.context().setOffline(false);
     if (shell !== null) {
