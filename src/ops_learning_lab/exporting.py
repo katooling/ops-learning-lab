@@ -115,7 +115,7 @@ class StandaloneExporter:
             _logical_strings(projection),
             policy.forbidden_canaries,
         )
-        rendered = _render_html(bundle, approval)
+        rendered = _render_html(projection, bundle, approval)
         _assert_rendered_canaries_absent(rendered, policy.forbidden_canaries)
         if len(rendered) > policy.max_export_bytes:
             raise ExportError("standalone export exceeds its size limit")
@@ -259,18 +259,18 @@ def _publishable_projection(bundle: LearningPackBundle) -> dict[str, Any]:
 def _public_activity_execution(activity: Any) -> dict[str, Any]:
     """Resolve the one built-in public fixture and its deterministic result."""
 
-    result = render_scenario(
-        activity.scenario_id,
-        activity.seed,
-        activity.input_revision_sha256,
-        ("run-pipeline",),
-    )
     if (
         activity.scenario_id != CODEX_ETL_ACTIVITY.scenario_id
         or activity.seed != CODEX_ETL_ACTIVITY.seed
         or activity.input_revision_sha256 != CODEX_ETL_ACTIVITY.input_sha256
     ):
         raise ExportError("standalone export has no approved public activity fixture")
+    result = render_scenario(
+        activity.scenario_id,
+        activity.seed,
+        activity.input_revision_sha256,
+        ("run-pipeline",),
+    )
     return {
         "public_records": [
             record.to_dict() for record in CODEX_ETL_ACTIVITY.records
@@ -319,10 +319,10 @@ def _assert_rendered_canaries_absent(
 
 
 def _render_html(
+    projection: dict[str, Any],
     bundle: LearningPackBundle,
     approval: ExportApproval,
 ) -> bytes:
-    projection = _publishable_projection(bundle)
     pack = projection["pack"]
     concepts = "".join(
         "<article>"

@@ -276,7 +276,8 @@ class _BoundDirectory:
                     follow_symlinks=False,
                 )
             except FileExistsError:
-                return _BoundCreateOutcome(False, True)
+                self._require_path_binding()
+                return _BoundCreateOutcome(False, self._sync_directory())
             directory_synced = self._sync_directory()
             if not self._path_matches_binding():
                 self._remove_committed_if_equal(name, content)
