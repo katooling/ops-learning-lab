@@ -16,6 +16,13 @@ raw source -> private intake + provenance manifest
 
 It does not yet generate lessons or provide the browser learner experience.
 
+## Product documentation
+
+- [Domain language](CONTEXT.md)
+- [Version one product specification](docs/specs/v1.md)
+- [Architecture decisions](docs/adr/)
+- [Contributor and agent guidance](AGENTS.md)
+
 ## Requirements
 
 - Python 3.11 or newer
