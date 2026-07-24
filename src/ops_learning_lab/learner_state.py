@@ -586,7 +586,7 @@ class EventAttemptStore:
             indent=2,
             sort_keys=True,
         ).encode("utf-8") + b"\n"
-        outcome = self._events.atomic_create(name, encoded, 0o600)
+        outcome = self._events.atomic_create_exclusive(name, encoded, 0o600)
         visible = self._events.read_regular(name, "learner event")
         if visible != encoded:
             raise LearnerStateError(

@@ -42,15 +42,23 @@ class _BoundDirectory:
         device: int,
         inode: int,
         label: str,
+        private: bool = False,
     ) -> None:
         self.path = path
         self._descriptor = descriptor
         self._device = device
         self._inode = inode
         self._label = label
+        self._private = private
 
     @classmethod
-    def open(cls, path: Path, label: str) -> _BoundDirectory:
+    def open(
+        cls,
+        path: Path,
+        label: str,
+        *,
+        private: bool = False,
+    ) -> _BoundDirectory:
         if not isinstance(path, Path):
             raise StorageError(f"{label} path is invalid")
         lexical_path = Path(os.path.abspath(path.expanduser()))
@@ -65,7 +73,7 @@ class _BoundDirectory:
             raise StorageError(f"{label} is missing or unsafe") from exc
         try:
             metadata = os.fstat(descriptor)
-            cls._validate_metadata(metadata, label)
+            cls._validate_metadata(metadata, label, private)
             visible = os.stat(lexical_path, follow_symlinks=False)
             if (
                 not stat.S_ISDIR(visible.st_mode)
@@ -79,19 +87,26 @@ class _BoundDirectory:
                 metadata.st_dev,
                 metadata.st_ino,
                 label,
+                private,
             )
         except BaseException:
             os.close(descriptor)
             raise
 
     @staticmethod
-    def _validate_metadata(metadata: os.stat_result, label: str) -> None:
+    def _validate_metadata(
+        metadata: os.stat_result,
+        label: str,
+        private: bool = False,
+    ) -> None:
         if not stat.S_ISDIR(metadata.st_mode):
             raise StorageError(f"{label} is missing or unsafe")
         if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
             raise StorageError(f"{label} is not owned by the current user")
         if metadata.st_mode & 0o022:
             raise StorageError(f"{label} cannot be group or world writable")
+        if private and metadata.st_mode & 0o077:
+            raise StorageError(f"{label} permissions must be 0700")
 
     def read_regular(self, name: str, label: str) -> bytes | None:
         """Read one leaf regular file without following links.
@@ -114,6 +129,7 @@ class _BoundDirectory:
         *,
         create: bool = False,
         mode: int = 0o700,
+        private: bool = False,
     ) -> _BoundDirectory:
         """Open one child directory relative to this retained descriptor.
 
@@ -145,7 +161,7 @@ class _BoundDirectory:
             raise StorageError(f"{label} is missing or unsafe") from exc
         try:
             metadata = os.fstat(descriptor)
-            self._validate_metadata(metadata, label)
+            self._validate_metadata(metadata, label, private)
             visible = os.stat(
                 name,
                 dir_fd=self._descriptor,
@@ -164,6 +180,7 @@ class _BoundDirectory:
                 metadata.st_dev,
                 metadata.st_ino,
                 label,
+                private,
             )
         except BaseException:
             os.close(descriptor)
@@ -325,6 +342,22 @@ class _BoundDirectory:
                 os.close(descriptor)
             self._unlink_if_present(temporary_name)
 
+    def atomic_create_exclusive(
+        self,
+        name: str,
+        content: bytes,
+        mode: int,
+    ) -> _BoundWriteOutcome:
+        """Create a new immutable leaf and fail if its identity already exists."""
+
+        outcome = self.atomic_create(name, content, mode)
+        if not outcome.created:
+            raise StorageError("atomic target already exists")
+        return _BoundWriteOutcome(
+            replaced=True,
+            directory_synced=outcome.directory_synced,
+        )
+
     def close(self) -> None:
         if self._descriptor >= 0:
             os.close(self._descriptor)
@@ -388,7 +421,7 @@ class _BoundDirectory:
 
     def _validate_bound_descriptor(self) -> None:
         metadata = os.fstat(self._descriptor)
-        self._validate_metadata(metadata, self._label)
+        self._validate_metadata(metadata, self._label, self._private)
         if metadata.st_dev != self._device or metadata.st_ino != self._inode:
             raise StorageError(f"{self._label} descriptor identity changed")
 
