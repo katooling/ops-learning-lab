@@ -252,6 +252,22 @@ class DurableLearningJourneyTests(unittest.TestCase):
                 "continues-with-duplicate",
                 4,
             )
+            view = first.run_scenario(view.attempt.attempt_id)
+            view = first.prove(
+                view.attempt.attempt_id,
+                tuple(
+                    EvidenceDecision(
+                        card.evidence_id,
+                        (
+                            "supports"
+                            if card.evidence_id
+                            in view.lesson.evidence.required_support
+                            else "rejects"
+                        ),
+                    )
+                    for card in view.lesson.evidence.cards
+                ),
+            )
             expected = view.attempt
             first_store.close()
 
@@ -265,13 +281,17 @@ class DurableLearningJourneyTests(unittest.TestCase):
             )
             restored = reopened.view(expected.attempt_id)
             self.assertEqual(restored.attempt, expected)
-            self.assertEqual(restored.attempt.next_step, "try")
+            self.assertEqual(restored.attempt.next_step, "explain")
             self.assertEqual(
                 restored.attempt.prediction.choice_id,
                 "continues-with-duplicate",
             )
             self.assertEqual(restored.attempt.renderer.seed, 7)
-            self.assertEqual(restored.attempt.renderer.effective_actions, ())
+            self.assertEqual(
+                restored.attempt.renderer.effective_actions,
+                ("run-pipeline",),
+            )
+            self.assertEqual(restored.attempt.evidence, expected.evidence)
             self.assertFalse(restored.attempt.completed)
 
             clock.value = "2026-07-24T12:10:00Z"
