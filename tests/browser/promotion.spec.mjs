@@ -10,6 +10,110 @@ async function tabTo(page, locator, limit = 80) {
   throw new Error(`Keyboard focus did not reach ${await locator.getAttribute("id")}`);
 }
 
+async function chooseWithKeyboard(page, locator) {
+  await tabTo(page, locator);
+  await page.keyboard.press("Space");
+  await expect(locator).toBeChecked();
+}
+
+async function completeLesson(
+  page,
+  {
+    predictionIndex,
+    evidenceVerdicts,
+    resetBeforeProve = false,
+  },
+) {
+  const begin = page.getByRole("button", { name: "Begin lesson" });
+  await tabTo(page, begin);
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("heading", { name: "Map", exact: true })).toBeVisible();
+  await expect(page.getByText("7 cents", { exact: true })).toHaveCount(0);
+
+  const mapDone = page.getByRole("button", { name: "I have traced the map" });
+  await tabTo(page, mapDone);
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("heading", { name: "Predict", exact: true })).toBeVisible();
+  await expect(page.getByText("7 cents", { exact: true })).toHaveCount(0);
+
+  const predictionChoices = page.getByRole("group", {
+    name: "Your prediction",
+  }).getByRole("radio");
+  await tabTo(page, predictionChoices.first());
+  await page.keyboard.press("Space");
+  for (let index = 0; index < predictionIndex; index += 1) {
+    await page.keyboard.press("ArrowDown");
+  }
+  await expect(predictionChoices.nth(predictionIndex)).toBeChecked();
+  const predictionConfidence = page.getByLabel("Confidence before the result");
+  await tabTo(page, predictionConfidence);
+  await page.keyboard.press("4");
+  const lockPrediction = page.getByRole("button", { name: "Lock prediction" });
+  await tabTo(page, lockPrediction);
+  await page.keyboard.press("Enter");
+
+  await expect(page.getByRole("heading", { name: "Try", exact: true })).toBeVisible();
+  await expect(page.getByText("7 cents", { exact: true })).toHaveCount(0);
+  const run = page.getByRole("button", { name: "Run the pipeline" });
+  await tabTo(page, run);
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("heading", { name: "Prove", exact: true })).toBeVisible();
+  await expect(page.getByText("7 cents", { exact: true })).toBeVisible();
+
+  if (resetBeforeProve) {
+    const reset = page.getByRole("button", { name: "Reset this scenario" });
+    await tabTo(page, reset);
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("heading", { name: "Try", exact: true })).toBeVisible();
+    await tabTo(page, page.getByRole("button", { name: "Run the pipeline" }));
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("heading", { name: "Prove", exact: true })).toBeVisible();
+    await expect(page.getByText("7 cents", { exact: true })).toBeVisible();
+  }
+
+  const supportChoices = page.getByRole("radio", { name: "Supports the claim" });
+  const rejectChoices = page.getByRole("radio", {
+    name: "Reject as insufficient or misleading",
+  });
+  for (let index = 0; index < evidenceVerdicts.length; index += 1) {
+    await chooseWithKeyboard(page, supportChoices.nth(index));
+    if (evidenceVerdicts[index] === "rejects") {
+      await page.keyboard.press("ArrowDown");
+      await expect(rejectChoices.nth(index)).toBeChecked();
+    }
+  }
+  const submitEvidence = page.getByRole("button", {
+    name: "Submit evidence decisions",
+  });
+  await tabTo(page, submitEvidence);
+  await page.keyboard.press("Enter");
+
+  await expect(page.getByRole("heading", { name: "Explain", exact: true })).toBeVisible();
+  await chooseWithKeyboard(
+    page,
+    page.getByRole("radio", {
+      name: "The rule reported the failure but allowed processing.",
+    }),
+  );
+  const explanation = page.getByLabel("Your explanation");
+  await tabTo(page, explanation);
+  await page.keyboard.type(
+    "The uniqueness rule reported the duplicate but allowed the downstream write.",
+  );
+  const uncertainty = page.getByLabel("What remains uncertain?");
+  await tabTo(page, uncertainty);
+  await page.keyboard.type(
+    "This synthetic result does not prove any real provider invoice is correct.",
+  );
+  const confidenceAfter = page.getByLabel("Confidence after the evidence");
+  await tabTo(page, confidenceAfter);
+  await page.keyboard.press("5");
+  const complete = page.getByRole("button", { name: "Complete attempt" });
+  await tabTo(page, complete);
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("heading", { name: "Review", exact: true })).toBeVisible();
+}
+
 test("keyboard Promotion completes without horizontal overflow at 320px", async ({
   page,
 }) => {
@@ -99,6 +203,48 @@ test("keyboard Promotion completes without horizontal overflow at 320px", async 
     page.getByRole("heading", { name: "Synthetic Codex ETL" }),
   ).toBeVisible();
   await expect(page.getByText("Promotion history")).toBeVisible();
+  await expect(page.getByText("browser-private-canary-6f103")).toHaveCount(0);
+
+  const lesson = page.getByRole("link", {
+    name: "Prove what a green ETL run does not prove",
+  });
+  await tabTo(page, lesson);
+  await page.keyboard.press("Enter");
+  await expect(
+    page.getByText("Map → Predict → Try → Prove → Explain → Review."),
+  ).toBeVisible();
+  await expect(page.getByText("7 cents", { exact: true })).toHaveCount(0);
+
+  await completeLesson(page, {
+    predictionIndex: 0,
+    evidenceVerdicts: ["supports", "supports", "supports", "supports"],
+    resetBeforeProve: true,
+  });
+  await expect(page.getByText("Mastery: Introduced")).toBeVisible();
+  await expect(page.getByText("prediction incorrect")).toBeVisible();
+  await expect(page.getByText("evidence insufficient")).toBeVisible();
+
+  const packLink = page.getByRole("link", { name: "Accepted packs" });
+  await tabTo(page, packLink);
+  await page.keyboard.press("Enter");
+  await tabTo(
+    page,
+    page.getByRole("link", { name: "Synthetic Codex ETL" }),
+  );
+  await page.keyboard.press("Enter");
+  await tabTo(
+    page,
+    page.getByRole("link", {
+      name: "Prove what a green ETL run does not prove",
+    }),
+  );
+  await page.keyboard.press("Enter");
+  await completeLesson(page, {
+    predictionIndex: 1,
+    evidenceVerdicts: ["supports", "supports", "supports", "rejects"],
+  });
+  await expect(page.getByText("Mastery: Demonstrated")).toBeVisible();
+  await expect(page.getByText("No qualification gaps.")).toBeVisible();
   await expect(page.getByText("browser-private-canary-6f103")).toHaveCount(0);
 
   const noOverflow = await page.evaluate(

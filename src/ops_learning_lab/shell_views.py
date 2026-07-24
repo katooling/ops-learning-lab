@@ -370,7 +370,10 @@ def _pack_index(service: PromotionService) -> bytes:
     )
 
 
-def _pack_detail(pack: LearningPack) -> bytes:
+def _pack_detail(
+    pack: LearningPack,
+    lessons: tuple[tuple[str, str], ...] = (),
+) -> bytes:
     claims = "".join(
         "<article>"
         f"<h3>{escape(claim.fact_status.title())} claim</h3>"
@@ -407,11 +410,17 @@ def _pack_detail(pack: LearningPack) -> bytes:
         "</article>"
         for record in pack.promotions
     )
+    lesson_items = "".join(
+        f'<li><a href="/learn/{escape(pack.pack_id)}/{escape(lesson_id)}">'
+        f"{escape(title)}</a></li>"
+        for lesson_id, title in lessons
+    ) or "<li>No lesson is available for this pack.</li>"
     return _layout(
         pack.title,
         f"<h1>{escape(pack.title)}</h1>"
         f"<p><span class=\"status\">accepted</span> version {pack.version}</p>"
         f"<p>Pack digest: <code>{escape(pack.content_sha256)}</code></p>"
+        f"<section><h2>Lessons</h2><ul>{lesson_items}</ul></section>"
         f"<section><h2>Accepted claims</h2>{claims}</section>"
         f"<section><h2>Promotion history</h2>{promotions}</section>",
     )

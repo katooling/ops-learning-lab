@@ -12,8 +12,10 @@ import sys
 from typing import Sequence
 
 from .compiler import compile_update, validate_capture_text
+from .bundle_repository import BundleRepository
 from .domain import SchemaError, SourceReference
 from .json_contract import JsonContractError, decode_json_object
+from .learning_service import InMemoryAttemptStore, LearningService
 from .pack_repository import PackRepository
 from .promotion import PromotionService
 from .promotion_models import PromotionError, StalePromotionError
@@ -214,11 +216,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             home = LearningHome.open(arguments.home)
             repository = PackUpdateRepository.open(home.root)
             service = _promotion_service(home, arguments.forbidden_canary_file)
+            learning = LearningService(
+                service.packs,
+                BundleRepository.open(home.root),
+                InMemoryAttemptStore(),
+            )
             server = make_server(
                 repository,
                 arguments.host,
                 arguments.port,
                 promotion=service,
+                learning=learning,
             )
             host, port = server.server_address[:2]
             _emit({"status": "serving", "url": f"http://{host}:{port}/"})

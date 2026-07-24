@@ -5,7 +5,7 @@ export default defineConfig({
   testMatch: "promotion.spec.mjs",
   fullyParallel: false,
   workers: 1,
-  timeout: 15_000,
+  timeout: 45_000,
   use: {
     baseURL: "http://127.0.0.1:4173",
     browserName: "chromium",
