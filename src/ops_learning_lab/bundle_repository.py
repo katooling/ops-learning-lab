@@ -142,3 +142,12 @@ class BundleRepository:
                         "Learning Pack Bundle replacement is uncertain"
                     )
         return bundle
+
+    def close(self) -> None:
+        self._directory.close()
+
+    def __enter__(self) -> BundleRepository:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()

@@ -14,6 +14,16 @@ AcceptedPackSnapshot ─┐
 public lesson blueprint┘
 ```
 
+Once assembled, a bundle is saved by digest under:
+
+```text
+snapshots/learning-packs/<bundle-sha256>.json
+```
+
+Lesson preparation is the only write path. Runtime consumers load a canonical
+bundle by digest and bind it to the current accepted Pack snapshot. They do not
+accept an arbitrary external bundle file.
+
 ## Identity
 
 The bundle records the exact accepted pack ID, version, and content digest.
@@ -57,4 +67,3 @@ Loading or constructing a bundle fails when:
 
 The bundle remains sanitized input, not permission to serialize every field.
 Each consumer still uses an explicit allowlist.
-

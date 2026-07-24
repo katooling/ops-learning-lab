@@ -161,11 +161,15 @@ def _publishable_projection(bundle: LearningPackBundle) -> dict[str, Any]:
         "lessons": [
             {
                 "lesson_id": lesson.lesson_id,
+                "lesson_revision_sha256": lesson.lesson_revision_sha256,
                 "title": lesson.title,
                 "concept_id": lesson.concept_id,
                 "claim_id": lesson.claim_id,
                 "outcome": {
                     "outcome_id": lesson.outcome.outcome_id,
+                    "outcome_revision_sha256": (
+                        lesson.outcome.outcome_revision_sha256
+                    ),
                     "statement": lesson.outcome.statement,
                 },
                 "map_stages": [
@@ -187,6 +191,9 @@ def _publishable_projection(bundle: LearningPackBundle) -> dict[str, Any]:
                     "scenario_id": lesson.activity.scenario_id,
                     "instructions": lesson.activity.instructions,
                     "seed": lesson.activity.seed,
+                    "input_revision_sha256": (
+                        lesson.activity.input_revision_sha256
+                    ),
                     "actions": [
                         {
                             "action_id": action.action_id,
@@ -295,6 +302,17 @@ def _render_html(bundle: LearningPackBundle) -> bytes:
         "</article>"
         for claim in projection["claims"]
     )
+    lesson_identities = "".join(
+        "<article>"
+        f"<h3>{escape(lesson['title'])}</h3>"
+        "<dl>"
+        f"<dt>Lesson revision</dt><dd><code>{escape(lesson['lesson_revision_sha256'])}</code></dd>"
+        f"<dt>Outcome revision</dt><dd><code>{escape(lesson['outcome']['outcome_revision_sha256'])}</code></dd>"
+        f"<dt>Activity input revision</dt><dd><code>{escape(lesson['activity']['input_revision_sha256'])}</code></dd>"
+        "</dl>"
+        "</article>"
+        for lesson in projection["lessons"]
+    )
     lessons = "".join(_render_lesson(lesson) for lesson in projection["lessons"])
     document = f"""<!doctype html>
 <html lang="en">
@@ -309,16 +327,27 @@ body {{ max-width: 64rem; margin: 0 auto; padding: 1.5rem; }}
 section, article {{ margin-block: 1.5rem; }}
 .map {{ display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit,minmax(12rem,1fr)); }}
 .card {{ border: 1px solid; border-radius: .4rem; padding: 1rem; }}
+.skip-link {{ position: absolute; left: -10000px; }}
+.skip-link:focus {{ position: static; }}
 dt {{ font-weight: 700; }}
 </style>
 </head>
 <body>
+<a class="skip-link" href="#content">Skip to learning content</a>
 <header>
 <p>Standalone reviewed Learning Pack</p>
 <h1>{escape(pack["title"])}</h1>
 <p>Pack version {pack["version"]}</p>
 </header>
-<main>
+<main id="content" tabindex="-1">
+<section id="artifact-identity" aria-labelledby="identity">
+<h2 id="identity">Reviewed artifact identity</h2>
+<dl>
+<dt>Learning Pack Bundle</dt><dd><code>{escape(bundle.bundle_sha256)}</code></dd>
+<dt>Accepted Pack snapshot</dt><dd><code>{escape(bundle.accepted_snapshot_sha256)}</code></dd>
+</dl>
+{lesson_identities}
+</section>
 <section aria-labelledby="concepts"><h2 id="concepts">Concepts</h2>{concepts}</section>
 <section aria-labelledby="facts"><h2 id="facts">Accepted facts</h2>{claims}</section>
 {lessons}
