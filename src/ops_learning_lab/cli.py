@@ -22,7 +22,8 @@ from .exporting import (
     StandaloneExporter,
 )
 from .json_contract import JsonContractError, decode_json_object
-from .learning_service import InMemoryAttemptStore, LearningService
+from .learner_state import EventAttemptStore
+from .learning_service import LearningService
 from .pack_repository import PackRepository
 from .publishable_home import PublishableHome
 from .promotion import PromotionService
@@ -260,7 +261,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             learning = LearningService(
                 service.packs,
                 BundleRepository.open(home.root),
-                InMemoryAttemptStore(),
+                EventAttemptStore.open(home.root),
             )
             server = make_server(
                 repository,

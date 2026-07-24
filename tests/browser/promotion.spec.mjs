@@ -22,11 +22,14 @@ async function completeLesson(
     predictionIndex,
     evidenceVerdicts,
     resetBeforeProve = false,
+    begin = true,
   },
 ) {
-  const begin = page.getByRole("button", { name: "Begin lesson" });
-  await tabTo(page, begin);
-  await page.keyboard.press("Enter");
+  if (begin) {
+    const beginButton = page.getByRole("button", { name: "Begin lesson" });
+    await tabTo(page, beginButton);
+    await page.keyboard.press("Enter");
+  }
   await expect(page.getByRole("heading", { name: "Map", exact: true })).toBeVisible();
   await expect(page.getByText("7 cents", { exact: true })).toHaveCount(0);
 
@@ -54,6 +57,13 @@ async function completeLesson(
 
   await expect(page.getByRole("heading", { name: "Try", exact: true })).toBeVisible();
   await expect(page.getByText("7 cents", { exact: true })).toHaveCount(0);
+  const checkpointUrl = page.url();
+  await page.reload();
+  await expect(page).toHaveURL(checkpointUrl);
+  await expect(page.getByRole("heading", { name: "Try", exact: true })).toBeVisible();
+  await expect(
+    page.getByText("Seed", { exact: true }).locator("xpath=following-sibling::dd[1]"),
+  ).toHaveText("7");
   const run = page.getByRole("button", { name: "Run the pipeline" });
   await tabTo(page, run);
   await page.keyboard.press("Enter");
@@ -215,10 +225,24 @@ test("keyboard Promotion completes without horizontal overflow at 320px", async 
   ).toBeVisible();
   await expect(page.getByText("7 cents", { exact: true })).toHaveCount(0);
 
+  const beginFirst = page.getByRole("button", { name: "Begin lesson" });
+  await tabTo(page, beginFirst);
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("heading", { name: "Map", exact: true })).toBeVisible();
+  const originalAttemptUrl = page.url();
+  const restart = page.getByRole("button", {
+    name: "Restart this whole attempt",
+  });
+  await tabTo(page, restart);
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("heading", { name: "Map", exact: true })).toBeVisible();
+  expect(page.url()).not.toBe(originalAttemptUrl);
+
   await completeLesson(page, {
     predictionIndex: 0,
     evidenceVerdicts: ["supports", "supports", "supports", "supports"],
     resetBeforeProve: true,
+    begin: false,
   });
   await expect(page.getByText("Mastery: Introduced")).toBeVisible();
   await expect(page.getByText("prediction incorrect")).toBeVisible();
@@ -245,7 +269,13 @@ test("keyboard Promotion completes without horizontal overflow at 320px", async 
   });
   await expect(page.getByText("Mastery: Demonstrated")).toBeVisible();
   await expect(page.getByText("No qualification gaps.")).toBeVisible();
+  await expect(page.getByText("Review scheduled:", { exact: false })).toBeVisible();
   await expect(page.getByText("browser-private-canary-6f103")).toHaveCount(0);
+
+  await page.goto("/learn/codex-etl/lesson-codex-etl-quality");
+  await expect(page.getByRole("heading", { name: "Attempt history" })).toBeVisible();
+  await expect(page.getByText(/learning — reset/)).toHaveCount(1);
+  await expect(page.getByText(/learning — completed/)).toHaveCount(2);
 
   const noOverflow = await page.evaluate(
     () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
