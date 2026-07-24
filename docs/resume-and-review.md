@@ -71,6 +71,18 @@ ID with different content, sequence gap, changed digest, unknown field, or
 invalid event transition fails closed. The application does not overwrite the
 last valid event to recover from corruption.
 
+The chain detects edited events, reordered events, sequence gaps, and deletion
+from inside the chain. Version 1 does **not** keep an independent durable head,
+so it cannot distinguish deliberate deletion of the newest event or newest
+suffix by the local learning-home owner from a history that always ended
+there. Back up the private event directory if that local-owner threat matters.
+
+Every append uses an exclusive learning-home lock and an atomic create. The
+store then reads the exact bytes back before reporting success. On a filesystem
+that cannot confirm directory `fsync`, this proves the event is visible and an
+exact command retry can recover it; it does not claim the event will survive a
+sudden host power loss.
+
 ## Reset means two different things
 
 | Action | Attempt ID | Seed | Recorded history |
@@ -80,6 +92,8 @@ last valid event to recover from corruption.
 
 Use scenario reset to retry the safe activity. Use whole-attempt restart when
 you intentionally want to discard the current prediction or loop progress.
+Reset attempts remain available from Attempt history as read-only evidence;
+only their replacement can continue.
 
 ## Artifacts that prove success
 
@@ -119,4 +133,5 @@ The focused tests prove exact mid-attempt process restart, command
 idempotency, stale-head rejection, append-only whole-attempt restart,
 corruption failure without repair writes, premature review rejection,
 successful retention, unsuccessful-review retry, read-only due-page GETs, and
-the real browser reload and keyboard journey.
+the real 320-pixel keyboard journey through reload, read-only reset history,
+due review, and Retained mastery.

@@ -237,6 +237,14 @@ test("keyboard Promotion completes without horizontal overflow at 320px", async 
   await page.keyboard.press("Enter");
   await expect(page.getByRole("heading", { name: "Map", exact: true })).toBeVisible();
   expect(page.url()).not.toBe(originalAttemptUrl);
+  const restartedAttemptUrl = page.url();
+  await page.goto(originalAttemptUrl);
+  await expect(page.getByRole("heading", { name: "Reset attempt" })).toBeVisible();
+  await expect(page.getByText("This attempt is read-only.", { exact: false })).toBeVisible();
+  await expect(page.locator("form")).toHaveCount(0);
+  await page.reload();
+  await expect(page.locator("form")).toHaveCount(0);
+  await page.goto(restartedAttemptUrl);
 
   await completeLesson(page, {
     predictionIndex: 0,
@@ -269,13 +277,25 @@ test("keyboard Promotion completes without horizontal overflow at 320px", async 
   });
   await expect(page.getByText("Mastery: Demonstrated")).toBeVisible();
   await expect(page.getByText("No qualification gaps.")).toBeVisible();
-  await expect(page.getByText("Review scheduled:", { exact: false })).toBeVisible();
+  await expect(page.getByText("Review due now.", { exact: false })).toBeVisible();
   await expect(page.getByText("browser-private-canary-6f103")).toHaveCount(0);
 
   await page.goto("/learn/codex-etl/lesson-codex-etl-quality");
   await expect(page.getByRole("heading", { name: "Attempt history" })).toBeVisible();
   await expect(page.getByText(/learning — reset/)).toHaveCount(1);
   await expect(page.getByText(/learning — completed/)).toHaveCount(2);
+  const beginReview = page.getByRole("button", { name: "Begin due review" });
+  await tabTo(page, beginReview);
+  await page.keyboard.press("Enter");
+  await completeLesson(page, {
+    predictionIndex: 1,
+    evidenceVerdicts: ["supports", "supports", "supports", "rejects"],
+    begin: false,
+  });
+  await expect(page.getByText("Mastery: Retained")).toBeVisible();
+  await expect(
+    page.getByText("A later qualifying review proved this outcome again."),
+  ).toBeVisible();
 
   const noOverflow = await page.evaluate(
     () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,

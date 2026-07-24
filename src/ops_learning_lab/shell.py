@@ -317,7 +317,12 @@ def make_server(
                 view = (
                     learning.start(parts[1], parts[2])
                     if parts[3] == "begin"
-                    else learning.start_review(parts[1], parts[2])
+                    else learning.start_review(
+                        parts[1],
+                        parts[2],
+                        self._one(fields, "review-of-attempt-id"),
+                        self._one(fields, "review-bundle-sha256"),
+                    )
                 )
             elif (
                 len(parts) == 3
