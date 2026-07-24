@@ -323,9 +323,12 @@ def _review_status(view: LearningView, csrf_token: str) -> str:
     if review.status == "not-scheduled":
         return "<p>Review is not scheduled yet.</p>"
     if review.status == "retained":
+        retaining_attempt_id = escape(review.latest_review_attempt_id or "")
         return (
             "<p><strong>Retained.</strong> A later qualifying review "
-            "proved this outcome again.</p>"
+            "proved this outcome again. "
+            f'<a href="/attempts/{retaining_attempt_id}">'
+            "Open retaining review attempt</a>.</p>"
         )
     if review.status == "in-progress":
         return "<p><strong>Review in progress.</strong></p>"
