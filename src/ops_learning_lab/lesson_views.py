@@ -20,20 +20,28 @@ def lesson_overview(view: LearningView, csrf_token: str) -> bytes:
     )
     return _layout(
         lesson.title,
-        f"<h1>{escape(lesson.title)}</h1>"
-        f"<p>{escape(lesson.outcome.statement)}</p>"
-        f"<p><span class=\"status\">{escape(view.mastery.state.title())}</span></p>"
-        "<p><strong>Learning loop:</strong> Map → Predict → Try → Prove → "
-        "Explain → Review.</p>"
-        "<section><h2>What you will trace</h2>"
-        f"<ol>{stages}</ol></section>"
-        "<aside class=\"trust\"><strong>Public synthetic lesson.</strong> "
-        "The activity uses fixed local records. It does not read private intake "
-        "or any live production system.</aside>"
-        f'<form method="post" action="/learn/{escape(view.bundle.pack_id)}/'
-        f'{escape(lesson.lesson_id)}/begin">'
-        f'<input type="hidden" name="csrf-token" value="{escape(csrf_token)}">'
-        '<button type="submit">Begin lesson</button></form>',
+        (
+            f"<h1>{escape(lesson.title)}</h1>"
+            f"<p>{escape(lesson.outcome.statement)}</p>"
+            f"<p><span class=\"status\">"
+            f"{escape(view.mastery.state.title())}</span></p>"
+        )
+        + _review_status(view, csrf_token)
+        + (
+            "<p><strong>Learning loop:</strong> Map → Predict → Try → Prove → "
+            "Explain → Review.</p>"
+            "<section><h2>What you will trace</h2>"
+            f"<ol>{stages}</ol></section>"
+            "<aside class=\"trust\"><strong>Public synthetic lesson.</strong> "
+            "The activity uses fixed local records. It does not read private "
+            "intake or any live production system.</aside>"
+            f'<form method="post" action="/learn/{escape(view.bundle.pack_id)}/'
+            f'{escape(lesson.lesson_id)}/begin">'
+            f'<input type="hidden" name="csrf-token" '
+            f'value="{escape(csrf_token)}">'
+            '<button type="submit">Begin lesson</button></form>'
+        )
+        + _history(view),
     )
 
 
@@ -42,11 +50,45 @@ def attempt_page(view: LearningView, csrf_token: str) -> bytes:
     if attempt is None:
         raise ValueError("attempt_page requires a Learner Attempt")
     lesson = view.lesson
+    history_entry = next(
+        (
+            entry
+            for entry in view.history
+            if entry.checkpoint.attempt_id == attempt.attempt_id
+        ),
+        None,
+    )
+    if history_entry is not None and history_entry.status == "reset":
+        content = (
+            "<section><h2>Reset attempt</h2>"
+            "<p><strong>This attempt is read-only.</strong> A whole-attempt "
+            "restart preserved this checkpoint in history and continued with "
+            "a new Learner Attempt ID.</p>"
+            f"<p>Last saved step: {escape(attempt.next_step.title())}.</p>"
+            f"<p>Replacement attempt: <a href=\"/attempts/"
+            f"{escape(history_entry.reset_by_attempt_id or '')}\"><code>"
+            f"{escape(history_entry.reset_by_attempt_id or '')}</code></a></p>"
+            "</section>"
+        )
+    else:
+        content = (
+            _progress(attempt.next_step)
+            + _step(view, csrf_token)
+            + (
+                _form(
+                    view,
+                    csrf_token,
+                    "restart",
+                    '<button type="submit">Restart this whole attempt</button>',
+                )
+                if not attempt.completed
+                else ""
+            )
+        )
     return _layout(
         lesson.title,
         f"<h1>{escape(lesson.title)}</h1>"
-        + _progress(attempt.next_step)
-        + _step(view, csrf_token)
+        + content
         + "<hr><details><summary>Attempt identity</summary><dl>"
         f"<dt>Learner Attempt ID</dt><dd><code>{escape(attempt.attempt_id)}</code></dd>"
         f"<dt>Lesson revision</dt><dd><code>{escape(attempt.lesson_revision_sha256)}</code></dd>"
@@ -259,14 +301,95 @@ def _complete(view: LearningView, _csrf_token: str) -> str:
         "<section><h2>Review</h2>"
         f"<p><strong>Mastery: {escape(view.mastery.state.title())}</strong></p>"
         f"<p>{'This attempt demonstrated the outcome.' if evaluation.qualifies else 'This attempt introduced the outcome; revise the gaps below.'}</p>"
-        f"<ul>{feedback}</ul>"
-        "<dl>"
-        f"<dt>Learner Attempt ID</dt><dd><code>{escape(attempt.attempt_id)}</code></dd>"
-        f"<dt>Attempt checkpoint</dt><dd><code>{escape(attempt.checkpoint_sha256)}</code></dd>"
-        f"<dt>Evaluation</dt><dd><code>{escape(evaluation.evaluation_sha256)}</code></dd>"
-        f"<dt>Terminal record</dt><dd><code>{escape(record.record_sha256)}</code></dd>"
-        "</dl></section>"
+        + _review_status(view, "")
+        + (
+            f"<ul>{feedback}</ul>"
+            "<dl>"
+            f"<dt>Learner Attempt ID</dt><dd><code>"
+            f"{escape(attempt.attempt_id)}</code></dd>"
+            f"<dt>Attempt checkpoint</dt><dd><code>"
+            f"{escape(attempt.checkpoint_sha256)}</code></dd>"
+            f"<dt>Evaluation</dt><dd><code>"
+            f"{escape(evaluation.evaluation_sha256)}</code></dd>"
+            f"<dt>Terminal record</dt><dd><code>"
+            f"{escape(record.record_sha256)}</code></dd>"
+            "</dl></section>"
+        )
     )
+
+
+def _review_status(view: LearningView, csrf_token: str) -> str:
+    review = view.review
+    if review.status == "not-scheduled":
+        return "<p>Review is not scheduled yet.</p>"
+    if review.status == "retained":
+        return (
+            "<p><strong>Retained.</strong> A later qualifying review "
+            "proved this outcome again.</p>"
+        )
+    if review.status == "in-progress":
+        return "<p><strong>Review in progress.</strong></p>"
+    due = escape(review.due_at or "unknown")
+    if review.status == "due":
+        action = (
+            f"/learn/{escape(view.bundle.pack_id)}/"
+            f"{escape(view.lesson.lesson_id)}/review"
+        )
+        form = (
+            f'<form method="post" action="{action}">'
+            f'<input type="hidden" name="csrf-token" value="{escape(csrf_token)}">'
+            f'<input type="hidden" name="review-of-attempt-id" '
+            f'value="{escape(review.demonstrated_by_attempt_id or "")}">'
+            f'<input type="hidden" name="review-bundle-sha256" '
+            f'value="{escape(_review_bundle_sha256(view))}">'
+            '<button type="submit">Begin due review</button></form>'
+            if csrf_token
+            else ""
+        )
+        return f"<p><strong>Review due now.</strong> Due {due}.</p>{form}"
+    label = "Retry scheduled" if review.status == "retry-scheduled" else (
+        "Review scheduled"
+    )
+    return f"<p><strong>{label}:</strong> {due}.</p>"
+
+
+def _review_bundle_sha256(view: LearningView) -> str:
+    source = view.review.demonstrated_by_attempt_id
+    if source is None:
+        return ""
+    return next(
+        (
+            entry.checkpoint.bundle_sha256
+            for entry in view.history
+            if entry.checkpoint.attempt_id == source
+        ),
+        "",
+    )
+
+
+def _history(view: LearningView) -> str:
+    matching = tuple(
+        entry
+        for entry in view.history
+        if entry.checkpoint.pack_id == view.bundle.pack_id
+        and entry.checkpoint.lesson_id == view.lesson.lesson_id
+    )
+    if not matching:
+        return "<section><h2>Attempt history</h2><p>No attempts yet.</p></section>"
+    items = "".join(
+        "<li>"
+        f'<a href="/attempts/{escape(entry.checkpoint.attempt_id)}">'
+        f"{escape(entry.checkpoint.attempt_id)}</a> — "
+        f"{escape(entry.attempt_kind)} — {escape(entry.status)}"
+        + (
+            f" — reset by {escape(entry.reset_by_attempt_id)}"
+            if entry.reset_by_attempt_id is not None
+            else ""
+        )
+        + "</li>"
+        for entry in matching
+    )
+    return f"<section><h2>Attempt history</h2><ol>{items}</ol></section>"
 
 
 def _yes_no(value: bool) -> str:

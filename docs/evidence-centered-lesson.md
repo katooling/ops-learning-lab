@@ -77,6 +77,8 @@ its scope.
 - **Demonstrated**: one completed attempt has the expected prediction, the
   exact evidence decisions, the correct structured mechanism, and a sufficient
   learner-written explanation.
+- **Retained**: a later, due review independently qualifies against the same
+  lesson and outcome revisions.
 
 Free prose is not graded by keywords. The structured mechanism and minimum
 length make the qualification rule deterministic while preserving the
@@ -101,9 +103,10 @@ Mastery State, feedback reason codes, and its own content digest. The terminal
 record has a third digest over both parts. That strict composite is the handoff
 contract for the durable learner-history slice; unknown fields fail closed.
 
-In version one, attempts live only in the running Product Shell process. A
-server restart clears them. Durable append-only learner history belongs to the
-next persistence slice; the renderer still will not receive that authority.
+The Product Shell stores checkpoints and terminal records in the private,
+append-only learner event history. A process restart restores the exact
+checkpoint. The renderer still never receives persistence or mastery
+authority. See [Resume learning and prove retained mastery](resume-and-review.md).
 
 ## Verification
 
@@ -127,8 +130,11 @@ keyboard input only. It proves:
 - Promotion opens the accepted lesson;
 - the first attempt records a wrong prediction and insufficient evidence;
 - deterministic reset returns to Try;
+- whole-attempt restart creates a new attempt and preserves the reset attempt;
+- browser reload restores the current checkpoint;
 - the first attempt remains Introduced;
 - a second qualifying attempt becomes Demonstrated;
+- the scheduled review and append-only attempt history are visible;
 - the private fixture canary never appears; and
 - the page has no horizontal overflow.
 

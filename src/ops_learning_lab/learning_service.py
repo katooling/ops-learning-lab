@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import secrets
 from threading import RLock
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable, Protocol
 
 from .activity import render_scenario
 from .attempts import (
@@ -25,8 +25,18 @@ from .learning import (
     derive_mastery,
     evaluate_attempt,
 )
+from .learner_state import (
+    AttemptHistoryEntry,
+    LearnerHistory,
+    LearnerStateError,
+)
 from .learning_bundle import LearningPackBundle, LessonBlueprint
 from .lesson_content import build_codex_etl_bundle
+from .review_projection import (
+    LearningStateProjection,
+    ReviewProjection,
+    project_learning_state,
+)
 
 
 class LearningError(RuntimeError):
@@ -41,6 +51,39 @@ class LearningView:
     evaluation: AttemptEvaluation | None
     record: LearnerAttemptRecord | None
     mastery: MasteryProjection
+    review: ReviewProjection
+    history: tuple[AttemptHistoryEntry, ...]
+
+
+class AttemptStore(Protocol):
+    def get(self, attempt_id: str) -> AttemptCheckpoint | None: ...
+
+    def list(self) -> tuple[AttemptCheckpoint, ...]: ...
+
+    def save(
+        self,
+        checkpoint: AttemptCheckpoint,
+        *,
+        expected_checkpoint_sha256: str | None,
+        **context: Any,
+    ) -> AttemptCheckpoint: ...
+
+    def complete(
+        self,
+        record: LearnerAttemptRecord,
+        *,
+        expected_checkpoint_sha256: str,
+        **context: Any,
+    ) -> AttemptCheckpoint: ...
+
+    def restart(
+        self,
+        previous_attempt_id: str,
+        checkpoint: AttemptCheckpoint,
+        *,
+        expected_checkpoint_sha256: str,
+        **context: Any,
+    ) -> AttemptCheckpoint: ...
 
 
 class InMemoryAttemptStore:
@@ -65,6 +108,7 @@ class InMemoryAttemptStore:
         checkpoint: AttemptCheckpoint,
         *,
         expected_checkpoint_sha256: str | None,
+        **_: object,
     ) -> AttemptCheckpoint:
         with self._lock:
             existing = self._attempts.get(checkpoint.attempt_id)
@@ -81,6 +125,37 @@ class InMemoryAttemptStore:
             self._attempts[checkpoint.attempt_id] = checkpoint
             return checkpoint
 
+    def complete(
+        self,
+        record: LearnerAttemptRecord,
+        *,
+        expected_checkpoint_sha256: str,
+        **_: object,
+    ) -> AttemptCheckpoint:
+        return self.save(
+            record.checkpoint,
+            expected_checkpoint_sha256=expected_checkpoint_sha256,
+        )
+
+    def restart(
+        self,
+        previous_attempt_id: str,
+        checkpoint: AttemptCheckpoint,
+        *,
+        expected_checkpoint_sha256: str,
+        **_: object,
+    ) -> AttemptCheckpoint:
+        with self._lock:
+            previous = self._attempts.get(previous_attempt_id)
+            if previous is None or previous.completed:
+                raise LearningError("Learner Attempt is not active")
+            if previous.checkpoint_sha256 != expected_checkpoint_sha256:
+                raise LearningError("Learner Attempt checkpoint is stale")
+            if checkpoint.attempt_id in self._attempts:
+                raise LearningError("replacement Learner Attempt already exists")
+            self._attempts[checkpoint.attempt_id] = checkpoint
+            return checkpoint
+
 
 class LearningService:
     """Own ordering, canonical attempts, evaluation, and derived mastery."""
@@ -89,7 +164,7 @@ class LearningService:
         self,
         packs,
         bundles: BundleRepository,
-        attempts: InMemoryAttemptStore,
+        attempts: AttemptStore,
         *,
         clock: Callable[[], str] | None = None,
         attempt_id_factory: Callable[[], str] | None = None,
@@ -101,19 +176,29 @@ class LearningService:
         self.attempt_id_factory = attempt_id_factory or (
             lambda: f"attempt-{secrets.token_hex(10)}"
         )
+        self._review_lock = RLock()
 
     def open_lesson(self, pack_id: str, lesson_id: str) -> LearningView:
         """Read current accepted input without persisting a bundle or attempt."""
 
         bundle = self._current_bundle(pack_id)
         lesson = _lesson(bundle, lesson_id)
+        projection, history = self._state(bundle)
+        review = self._review_for_route(
+            pack_id,
+            lesson_id,
+            history,
+            projection.review,
+        )
         return LearningView(
             bundle=bundle,
             lesson=lesson,
             attempt=None,
             evaluation=None,
             record=None,
-            mastery=derive_mastery(bundle, self.attempts.list()),
+            mastery=projection.mastery,
+            review=review,
+            history=history,
         )
 
     def available_lessons(
@@ -131,7 +216,74 @@ class LearningService:
             return ()
 
     def start(self, pack_id: str, lesson_id: str) -> LearningView:
+        return self._start(pack_id, lesson_id, "learning", None)
+
+    def start_review(
+        self,
+        pack_id: str,
+        lesson_id: str,
+        demonstration_attempt_id: str,
+        bundle_sha256: str,
+    ) -> LearningView:
+        with self._review_lock:
+            history = self._durable_history()
+            demonstration = history.get(demonstration_attempt_id)
+            if (
+                demonstration is None
+                or demonstration.checkpoint.pack_id != pack_id
+                or demonstration.checkpoint.lesson_id != lesson_id
+                or demonstration.checkpoint.bundle_sha256 != bundle_sha256
+            ):
+                raise LearningError(
+                    "Review demonstration does not match this lesson"
+                )
+            bundle = self.bundles.snapshot(bundle_sha256)
+            if bundle is None:
+                raise LearnerStateError(
+                    "learner history references a missing review bundle snapshot"
+                )
+            lesson = _lesson(bundle, lesson_id)
+            projection = project_learning_state(
+                bundle,
+                history,
+                self.clock(),
+            )
+            if projection.review.status != "due":
+                raise LearningError("Review is not due yet")
+            source = projection.review.demonstrated_by_attempt_id
+            if source != demonstration_attempt_id:
+                raise LearningError(
+                    "Review demonstration is not the due artifact"
+                )
+            return self._start_from_bundle(
+                bundle,
+                lesson.lesson_id,
+                "review",
+                source,
+            )
+
+    def _start(
+        self,
+        pack_id: str,
+        lesson_id: str,
+        attempt_kind: str,
+        review_of_attempt_id: str | None,
+    ) -> LearningView:
         bundle = self._current_bundle(pack_id)
+        return self._start_from_bundle(
+            bundle,
+            lesson_id,
+            attempt_kind,
+            review_of_attempt_id,
+        )
+
+    def _start_from_bundle(
+        self,
+        bundle: LearningPackBundle,
+        lesson_id: str,
+        attempt_kind: str,
+        review_of_attempt_id: str | None,
+    ) -> LearningView:
         lesson = _lesson(bundle, lesson_id)
         self.bundles.save(bundle)
         now = self.clock()
@@ -168,7 +320,13 @@ class LearningService:
             hints=(),
             completed=False,
         )
-        self.attempts.save(attempt, expected_checkpoint_sha256=None)
+        self.attempts.save(
+            attempt,
+            expected_checkpoint_sha256=None,
+            attempt_kind=attempt_kind,
+            review_of_attempt_id=review_of_attempt_id,
+            occurred_at=now,
+        )
         return self._view(attempt)
 
     def view(self, attempt_id: str) -> LearningView:
@@ -255,6 +413,55 @@ class LearningService:
             completed=False,
         ))
 
+    def restart_attempt(self, attempt_id: str) -> LearningView:
+        previous = self.view(attempt_id).attempt
+        if previous is None or previous.completed:
+            raise LearningError("only an active Learner Attempt can restart")
+        bundle = self.bundles.snapshot(previous.bundle_sha256)
+        if bundle is None:
+            raise LearningError("Learner Attempt bundle snapshot is missing")
+        lesson = _lesson(bundle, previous.lesson_id)
+        now = self.clock()
+        replacement = AttemptCheckpoint.build(
+            attempt_id=self.attempt_id_factory(),
+            pack_id=previous.pack_id,
+            pack_version=previous.pack_version,
+            pack_sha256=previous.pack_sha256,
+            bundle_sha256=previous.bundle_sha256,
+            lesson_id=previous.lesson_id,
+            lesson_revision_sha256=previous.lesson_revision_sha256,
+            outcome_id=previous.outcome_id,
+            outcome_revision_sha256=previous.outcome_revision_sha256,
+            started_at=now,
+            updated_at=now,
+            next_step="map",
+            prediction=None,
+            renderer=RendererCheckpoint(
+                scenario_id=lesson.activity.scenario_id,
+                input_sha256=lesson.activity.input_revision_sha256,
+                seed=lesson.activity.seed,
+                effective_actions=(),
+                action_history=(),
+                result=render_scenario(
+                    lesson.activity.scenario_id,
+                    lesson.activity.seed,
+                    lesson.activity.input_revision_sha256,
+                    (),
+                ),
+            ),
+            evidence=(),
+            explanation=None,
+            hints=(),
+            completed=False,
+        )
+        saved = self.attempts.restart(
+            attempt_id,
+            replacement,
+            expected_checkpoint_sha256=previous.checkpoint_sha256,
+            occurred_at=now,
+        )
+        return self._view(saved)
+
     def prove(
         self,
         attempt_id: str,
@@ -306,10 +513,25 @@ class LearningService:
         previous: AttemptCheckpoint,
         next_checkpoint: AttemptCheckpoint,
     ) -> LearningView:
-        saved = self.attempts.save(
-            next_checkpoint,
-            expected_checkpoint_sha256=previous.checkpoint_sha256,
-        )
+        if next_checkpoint.completed:
+            bundle = self.bundles.snapshot(next_checkpoint.bundle_sha256)
+            if bundle is None:
+                raise LearningError("Learner Attempt bundle snapshot is missing")
+            record = LearnerAttemptRecord.build(
+                next_checkpoint,
+                evaluate_attempt(bundle, next_checkpoint),
+            )
+            saved = self.attempts.complete(
+                record,
+                expected_checkpoint_sha256=previous.checkpoint_sha256,
+                occurred_at=next_checkpoint.updated_at,
+            )
+        else:
+            saved = self.attempts.save(
+                next_checkpoint,
+                expected_checkpoint_sha256=previous.checkpoint_sha256,
+                occurred_at=next_checkpoint.updated_at,
+            )
         return self._view(saved)
 
     def _require_step(
@@ -331,7 +553,9 @@ class LearningService:
     def _view(self, attempt: AttemptCheckpoint) -> LearningView:
         bundle = self.bundles.snapshot(attempt.bundle_sha256)
         if bundle is None:
-            raise LearningError("Learner Attempt bundle snapshot is missing")
+            raise LearnerStateError(
+                "learner history references a missing attempt bundle snapshot"
+            )
         lesson = _lesson(bundle, attempt.lesson_id)
         evaluation = (
             evaluate_attempt(bundle, attempt) if attempt.completed else None
@@ -341,14 +565,91 @@ class LearningService:
             if attempt.completed
             else None
         )
-        mastery = derive_mastery(bundle, self.attempts.list())
+        projection, history = self._state(bundle)
         return LearningView(
             bundle=bundle,
             lesson=lesson,
             attempt=attempt,
             evaluation=evaluation,
             record=record,
-            mastery=mastery,
+            mastery=projection.mastery,
+            review=projection.review,
+            history=history,
+        )
+
+    def _state(
+        self,
+        bundle: LearningPackBundle,
+    ) -> tuple[LearningStateProjection, tuple[AttemptHistoryEntry, ...]]:
+        history_method = getattr(self.attempts, "history", None)
+        if callable(history_method):
+            history = history_method()
+            return project_learning_state(
+                bundle,
+                history,
+                self.clock(),
+            ), history.attempts
+        return (
+            LearningStateProjection(
+                derive_mastery(bundle, self.attempts.list()),
+                ReviewProjection("not-scheduled", None, None, None),
+            ),
+            (),
+        )
+
+    def _durable_history(self) -> LearnerHistory:
+        history_method = getattr(self.attempts, "history", None)
+        if not callable(history_method):
+            raise LearningError("durable learner history is unavailable")
+        return history_method()
+
+    def _review_for_route(
+        self,
+        pack_id: str,
+        lesson_id: str,
+        history_entries: tuple[AttemptHistoryEntry, ...],
+        current: ReviewProjection,
+    ) -> ReviewProjection:
+        history_method = getattr(self.attempts, "history", None)
+        if not callable(history_method):
+            return current
+        history = LearnerHistory((), history_entries)
+        seen: set[str] = set()
+        projections: list[ReviewProjection] = []
+        now = self.clock()
+        for entry in history_entries:
+            checkpoint = entry.checkpoint
+            if (
+                checkpoint.pack_id != pack_id
+                or checkpoint.lesson_id != lesson_id
+                or checkpoint.bundle_sha256 in seen
+            ):
+                continue
+            seen.add(checkpoint.bundle_sha256)
+            bundle = self.bundles.snapshot(checkpoint.bundle_sha256)
+            if bundle is None:
+                raise LearnerStateError(
+                    "learner history references a missing review bundle snapshot"
+                )
+            projection = project_learning_state(bundle, history, now).review
+            if projection.status != "not-scheduled":
+                projections.append(projection)
+        if not projections:
+            return current
+        priority = {
+            "in-progress": 0,
+            "due": 1,
+            "retry-scheduled": 2,
+            "scheduled": 3,
+            "retained": 4,
+        }
+        return min(
+            projections,
+            key=lambda review: (
+                priority[review.status],
+                review.due_at or "",
+                review.demonstrated_by_attempt_id or "",
+            ),
         )
 
     def _current_bundle(self, pack_id: str) -> LearningPackBundle:
