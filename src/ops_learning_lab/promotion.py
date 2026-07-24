@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import json
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from .domain import PACK_ID_PATTERN, SHA256_PATTERN, SchemaError, StagedPackUpdate
 from .pack_repository import PackRepository, _PromotionPackStore
@@ -22,6 +22,19 @@ from .promotion_models import (
     _non_empty,
 )
 from .staging import PackUpdateRepository
+
+
+def _logical_strings(value: object) -> Iterator[str]:
+    """Visit JSON strings before serialization can escape their contents."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for key, child in value.items():
+            yield from _logical_strings(key)
+            yield from _logical_strings(child)
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            yield from _logical_strings(child)
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,13 +177,11 @@ class PromotionService:
             return PromotionResult(resulting, resulting.promotions[-1], False)
 
     def _assert_no_configured_canary(self, pack: LearningPack) -> None:
-        encoded = json.dumps(
-            pack.to_dict(),
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        if any(canary in encoded for canary in self.forbidden_canaries):
+        if any(
+            canary in text
+            for text in _logical_strings(pack.to_dict())
+            for canary in self.forbidden_canaries
+        ):
             raise PromotionError("accepted pack contains a configured private canary")
 
     @staticmethod

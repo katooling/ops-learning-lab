@@ -34,8 +34,9 @@ record cannot be partially committed.
 
 Structural private-text rules run both when a Promotion decision is created and
 when an accepted pack is constructed or loaded. Configured exact canaries run
-against the full next pack before write. Human review remains necessary because
-no structural or canary rule can recognize arbitrary private meaning.
+against every logical string in the full next pack before JSON escaping and
+before write. Human review remains necessary because no structural or canary
+rule can recognize arbitrary private meaning.
 
 ## Read-only consumer seam
 

@@ -141,7 +141,7 @@ Structural validation always rejects private storage markers such as intake
 IDs, raw-file paths, and source content hashes. It cannot recognize every
 possible private name or sentence.
 
-For a known high-risk marker, configure its exact UTF-8 bytes:
+For a known high-risk marker, configure its exact UTF-8 text:
 
 ```bash
 opslearn serve \
@@ -151,8 +151,10 @@ opslearn serve \
 ```
 
 `promotion-preview` and `promotion-commit` accept the same repeatable option.
-Promotion scans the complete resulting pack in memory and blocks before write
-when a configured exact canary appears.
+Promotion scans every logical string in the complete resulting pack before JSON
+serialization and blocks before write when a configured exact canary appears.
+Newlines, quotes, and backslashes therefore cannot evade the check by becoming
+JSON escape sequences.
 
 These checks complement explicit human review. They are not a universal
 sensitive-data detector.

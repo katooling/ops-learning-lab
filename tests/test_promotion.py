@@ -648,6 +648,42 @@ class PromotionServiceTests(unittest.TestCase):
                 service.preview(plan)
             self.assertIsNone(fixture.packs.get("codex-etl"))
 
+    def test_configured_canaries_are_checked_as_logical_unescaped_strings(self):
+        canaries = (
+            "line-one\nline-two",
+            'quoted "canary"',
+            "backslash\\canary",
+        )
+        for index, canary in enumerate(canaries):
+            with self.subTest(kind=index), tempfile.TemporaryDirectory() as directory:
+                fixture = PromotionFixture(directory)
+                service = PromotionService(
+                    fixture.updates,
+                    fixture.packs,
+                    clock=lambda: NOW,
+                    forbidden_canaries=(canary,),
+                )
+                update = fixture.stage(
+                    "Codex ETL usage.\nClaim: Escaped canary candidate.\n",
+                    f"escaped-canary-{index}",
+                )
+                plan = fixture.plan(
+                    update,
+                    (
+                        accept(
+                            update.proposed_claims[0].proposal_id,
+                            f"Reviewed prefix {canary} suffix.",
+                        ),
+                    ),
+                )
+
+                with self.assertRaisesRegex(
+                    PromotionError,
+                    "configured private canary",
+                ):
+                    service.preview(plan)
+                self.assertIsNone(fixture.packs.get("codex-etl"))
+
     def test_preview_change_summary_is_deterministic_and_classified(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = PromotionFixture(directory)

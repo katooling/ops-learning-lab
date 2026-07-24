@@ -29,17 +29,15 @@ class StorageError(RuntimeError):
     """Raised when a learning home violates its filesystem contract."""
 
 
-class PostReplaceSyncError(OSError):
-    """The target was replaced, but durability confirmation failed afterward."""
+@dataclass(frozen=True, slots=True)
+class AtomicWriteOutcome:
+    """Truthful result once an atomic replacement is visible."""
 
-    def __init__(self, path: Path, intended: bytes, cause: OSError) -> None:
-        super().__init__(f"directory sync failed after replacing {path.name}")
-        self.path = path
-        self.intended = intended
-        self.__cause__ = cause
+    replaced: bool
+    directory_synced: bool
 
 
-def _write_atomic(path: Path, data: bytes, mode: int) -> None:
+def _write_atomic(path: Path, data: bytes, mode: int) -> AtomicWriteOutcome:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.", dir=path.parent
@@ -58,8 +56,13 @@ def _write_atomic(path: Path, data: bytes, mode: int) -> None:
                 os.fsync(directory_descriptor)
             finally:
                 os.close(directory_descriptor)
-        except OSError as exc:
-            raise PostReplaceSyncError(path, data, exc) from exc
+        except OSError:
+            # os.replace is the commit point: callers must not report an ordinary
+            # failure after the intended file is already visible. A caller that
+            # needs stronger proof can re-read the target when durability was not
+            # confirmed.
+            return AtomicWriteOutcome(replaced=True, directory_synced=False)
+        return AtomicWriteOutcome(replaced=True, directory_synced=True)
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise

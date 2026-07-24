@@ -431,6 +431,39 @@ class CaptureModeJourneyTests(unittest.TestCase):
 
             self.assertEqual(list(repository.root.iterdir()), [])
 
+    def test_stage_succeeds_when_file_is_visible_but_directory_sync_fails(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = LearningHome.initialize(Path(directory) / "learning-home")
+            repository = PackUpdateRepository.open(home.root)
+            source = SourceReference(
+                source_type="pasted-text",
+                source_id="stage-post-replace-sync",
+                observed_at="2026-07-24T12:00:00Z",
+            )
+            content = b"Codex ETL usage.\nClaim: Visible staged write.\n"
+            manifest = home.capture(content, source)
+            update = compile_update(content, manifest)
+            real_fsync = os.fsync
+            calls = 0
+
+            def fail_directory_sync(descriptor):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("synthetic directory fsync failure")
+                return real_fsync(descriptor)
+
+            with mock.patch(
+                "ops_learning_lab.storage.os.fsync",
+                side_effect=fail_directory_sync,
+            ):
+                staged = repository.stage(update)
+
+            self.assertEqual(staged, update)
+            self.assertEqual(repository.get(update.update_id), update)
+
     @staticmethod
     def _one_staged_update() -> tuple[
         PackUpdateRepository,

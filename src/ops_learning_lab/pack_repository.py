@@ -18,7 +18,6 @@ from .promotion_models import (
     PromotionRecord,
 )
 from .storage import (
-    PostReplaceSyncError,
     StorageError,
     _read_confined_regular_file,
     _write_atomic,
@@ -131,23 +130,7 @@ class _PromotionPackStore(PackRepository):
             + "\n"
         ).encode("utf-8")
         try:
-            _write_atomic(path, encoded, 0o600)
-        except PostReplaceSyncError as exc:
-            try:
-                visible = _read_confined_regular_file(
-                    path,
-                    pack_root,
-                    "Learning Pack",
-                )
-            except StorageError as read_error:
-                raise UncertainPromotionCommit(
-                    "Promotion replacement happened but its visible state is uncertain"
-                ) from read_error
-            if visible == encoded:
-                return
-            raise UncertainPromotionCommit(
-                "Promotion replacement happened but intended bytes are not visible"
-            ) from exc
+            outcome = _write_atomic(path, encoded, 0o600)
         except BaseException:
             if created:
                 try:
@@ -155,6 +138,22 @@ class _PromotionPackStore(PackRepository):
                 except OSError:
                     pass
             raise
+        if not outcome.directory_synced:
+            try:
+                visible = _read_confined_regular_file(
+                    path,
+                    pack_root,
+                    "Learning Pack",
+                )
+            except (OSError, StorageError) as read_error:
+                raise UncertainPromotionCommit(
+                    "Promotion replacement happened but its visible state is uncertain"
+                ) from read_error
+            if visible == encoded:
+                return
+            raise UncertainPromotionCommit(
+                "Promotion replacement happened but intended bytes are not visible"
+            )
 
     def _find_promotion_by_update(
         self,
