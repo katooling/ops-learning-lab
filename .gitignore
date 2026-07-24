@@ -17,3 +17,8 @@ dist/
 private/
 exports/
 *.jsonl
+
+# Test-only browser dependencies and failure artifacts.
+tests/browser/node_modules/
+tests/browser/test-results/
+tests/browser/playwright-report/

@@ -29,6 +29,16 @@ class StorageError(RuntimeError):
     """Raised when a learning home violates its filesystem contract."""
 
 
+class PostReplaceSyncError(OSError):
+    """The target was replaced, but durability confirmation failed afterward."""
+
+    def __init__(self, path: Path, intended: bytes, cause: OSError) -> None:
+        super().__init__(f"directory sync failed after replacing {path.name}")
+        self.path = path
+        self.intended = intended
+        self.__cause__ = cause
+
+
 def _write_atomic(path: Path, data: bytes, mode: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -42,11 +52,14 @@ def _write_atomic(path: Path, data: bytes, mode: int) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         temporary.replace(path)
-        directory_descriptor = os.open(path.parent, os.O_RDONLY)
         try:
-            os.fsync(directory_descriptor)
-        finally:
-            os.close(directory_descriptor)
+            directory_descriptor = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+        except OSError as exc:
+            raise PostReplaceSyncError(path, data, exc) from exc
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise

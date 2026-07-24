@@ -21,3 +21,33 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Verify
         run: ./scripts/verify
+
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: tests/browser/package-lock.json
+      - name: Install browser test dependencies
+        run: npm ci
+        working-directory: tests/browser
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: tests/browser
+      - name: Verify real-browser Promotion journey
+        run: npm test
+        working-directory: tests/browser
+      - name: Upload browser failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-failure-artifacts
+          path: |
+            tests/browser/test-results
+            tests/browser/playwright-report

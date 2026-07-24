@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+import json
 from typing import Any, Callable
 
 from .domain import PACK_ID_PATTERN, SHA256_PATTERN, SchemaError, StagedPackUpdate
-from .pack_repository import PackRepository
+from .pack_repository import PackRepository, _PromotionPackStore
 from .promotion_models import (
     AcceptedClaim,
     AcceptedProvenance,
@@ -44,10 +45,20 @@ class PromotionReview:
 
 
 @dataclass(frozen=True, slots=True)
+class PromotionChangeSummary:
+    """Deterministic learner-facing classification of reviewed changes."""
+
+    removed: tuple[str, ...]
+    retained: tuple[str, ...]
+    generalized: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class PromotionPreview:
     plan: PromotionPlan
     resulting_pack: LearningPack
     preview_sha256: str
+    changes: PromotionChangeSummary
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,12 +77,20 @@ class PromotionService:
         packs: PackRepository,
         *,
         clock: Callable[[], str] | None = None,
+        forbidden_canaries: tuple[str, ...] = (),
     ) -> None:
         self.updates = updates
         self.packs = packs
+        self._store = _PromotionPackStore(packs.root)
         self.clock = clock or (
             lambda: datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         )
+        if not isinstance(forbidden_canaries, tuple) or any(
+            not isinstance(canary, str) or not canary
+            for canary in forbidden_canaries
+        ):
+            raise ValueError("forbidden_canaries must be non-empty strings")
+        self.forbidden_canaries = forbidden_canaries
 
     def review(
         self,
@@ -102,8 +121,14 @@ class PromotionService:
         current = self.packs.get(plan.target_pack_id)
         self._require_expected_base(plan, current)
         resulting = self._apply(plan, update, current, self.clock())
+        self._assert_no_configured_canary(resulting)
         preview_sha256 = self._semantic_preview_sha(plan, update, current)
-        return PromotionPreview(plan, resulting, preview_sha256)
+        return PromotionPreview(
+            plan,
+            resulting,
+            preview_sha256,
+            self._change_summary(plan, update),
+        )
 
     def commit(
         self,
@@ -114,9 +139,8 @@ class PromotionService:
             preview_sha256
         ):
             raise PromotionError("preview confirmation does not match the schema")
-        with self.packs.locked():
-            update = self._validate_plan(plan)
-            prior = self.packs.find_promotion_by_update(plan.update_id)
+        with self._store._locked_for_promotion():
+            prior = self._store._find_promotion_by_update(plan.update_id)
             if prior is not None:
                 prior_pack, prior_record = prior
                 if (
@@ -127,15 +151,55 @@ class PromotionService:
                 raise StalePromotionError(
                     "staged Pack Update already has a different Promotion decision"
                 )
+            update = self._validate_plan(plan)
             current = self.packs.get(plan.target_pack_id)
             self._require_expected_base(plan, current)
             applied_at = self.clock()
             resulting = self._apply(plan, update, current, applied_at)
+            self._assert_no_configured_canary(resulting)
             semantic_preview = self._semantic_preview_sha(plan, update, current)
             if preview_sha256 != semantic_preview:
                 raise StalePromotionError("promotion preview is stale")
-            self.packs.write(resulting)
+            self._store._write_promoted(resulting)
             return PromotionResult(resulting, resulting.promotions[-1], False)
+
+    def _assert_no_configured_canary(self, pack: LearningPack) -> None:
+        encoded = json.dumps(
+            pack.to_dict(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        if any(canary in encoded for canary in self.forbidden_canaries):
+            raise PromotionError("accepted pack contains a configured private canary")
+
+    @staticmethod
+    def _change_summary(
+        plan: PromotionPlan,
+        update: StagedPackUpdate,
+    ) -> PromotionChangeSummary:
+        proposed = {
+            claim.proposal_id: claim for claim in update.proposed_claims
+        }
+        removed: list[str] = []
+        retained: list[str] = []
+        generalized: list[str] = []
+        for decision in plan.decisions:
+            claim = proposed[decision.proposal_id]
+            if decision.action == "reject":
+                removed.append(decision.proposal_id)
+                continue
+            retained.append(f"{decision.proposal_id}:safe-provenance")
+            if decision.fact_status == claim.fact_status:
+                retained.append(f"{decision.proposal_id}:fact-status")
+            else:
+                generalized.append(f"{decision.proposal_id}:fact-status")
+            generalized.append(f"{decision.proposal_id}:text")
+        return PromotionChangeSummary(
+            removed=tuple(removed),
+            retained=tuple(retained),
+            generalized=tuple(generalized),
+        )
 
     def _semantic_preview_sha(
         self,

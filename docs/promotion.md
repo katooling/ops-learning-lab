@@ -38,6 +38,10 @@ The review page shows:
 No destination or decision is preselected. Enter the target pack ID and title,
 then decide every proposal.
 
+The page carries a signed snapshot of the exact accepted pack versions and
+digests visible at Review time. Preview uses that snapshot. It does not silently
+refresh to a newer base.
+
 For an accepted proposal:
 
 1. Write the accepted text independently in the blank field.
@@ -55,8 +59,9 @@ history.
 Choose **Preview without writing**.
 
 The preview places every staged proposal beside its exact accepted wording or
-rejection. Check the status and history relationship. The accepted pack still
-has not changed.
+rejection. A deterministic summary separately lists removed proposals, retained
+safe provenance and statuses, and generalized text or status. Check the status
+and history relationship. The accepted pack still has not changed.
 
 If another Promotion changes the pack before confirmation, the server returns
 a conflict. It shows the decisions you entered, writes nothing, and asks you to
@@ -74,6 +79,11 @@ syncs it, replaces the canonical file, and syncs the parent directory.
 
 An identical retry returns the existing result. A different decision for an
 already promoted update fails without writing.
+
+Replacement is the commit point. If the later directory sync reports an error,
+Promotion re-reads the canonical file. Exact intended bytes count as committed;
+an unreadable or different result is reported as an uncertain commit instead of
+being mislabeled as a clean failure.
 
 ## 4. Inspect the accepted artifact
 
@@ -125,6 +135,28 @@ sanitized accepted fields or a structured rejection reason. Unknown fields,
 duplicate JSON keys, non-finite numbers, malformed decisions, and stale bases
 fail closed.
 
+### Optional exact canaries
+
+Structural validation always rejects private storage markers such as intake
+IDs, raw-file paths, and source content hashes. It cannot recognize every
+possible private name or sentence.
+
+For a known high-risk marker, configure its exact UTF-8 bytes:
+
+```bash
+opslearn serve \
+  --home /tmp/ops-learning-home \
+  --port 8000 \
+  --forbidden-canary-file /tmp/private-canary.txt
+```
+
+`promotion-preview` and `promotion-commit` accept the same repeatable option.
+Promotion scans the complete resulting pack in memory and blocks before write
+when a configured exact canary appears.
+
+These checks complement explicit human review. They are not a universal
+sensitive-data detector.
+
 ## What proves success
 
 Run:
@@ -141,8 +173,26 @@ private canary is absent.
 `PromotionServiceTests` additionally prove:
 
 - exact retry idempotency and one-use staged updates;
+- exact retry recovery even when private staging is later unavailable;
 - stale and concurrent decision conflicts;
 - contradiction history;
 - interrupted-write recovery;
+- post-replacement sync ambiguity handling;
+- deterministic removed, retained, and generalized summaries;
+- configured exact-canary blocking;
 - strict malformed-input handling;
 - symlink and named-pipe rejection.
+
+The test-only real-browser proof is separate from the dependency-free runtime:
+
+```bash
+npm --prefix tests/browser ci
+(cd tests/browser && npx playwright install chromium)
+./scripts/verify-browser
+```
+
+It uses Chromium and keyboard input only to prove native required-field
+blocking, blank choices, Review-to-Preview focus order, explicit confirmation,
+the final `303` pack redirect, and no horizontal overflow at 320 pixels. The
+fixture creates only synthetic temporary state and removes it when the server
+stops.

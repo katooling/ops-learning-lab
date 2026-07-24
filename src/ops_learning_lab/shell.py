@@ -82,11 +82,34 @@ def make_server(
                 prefix = "/updates/"
                 if path.startswith(prefix) and "/" not in path[len(prefix) :]:
                     update = repository.get(path[len(prefix) :])
+                    accepted_packs = (
+                        tuple(promotion.packs.list())
+                        if promotion is not None
+                        else ()
+                    )
+                    review_snapshot = {
+                        "schema_version": 1,
+                        "update_id": update.update_id,
+                        "proposal_sha256": update.proposal_sha256,
+                        "packs": {
+                            pack.pack_id: {
+                                "title": pack.title,
+                                "version": pack.version,
+                                "content_sha256": pack.content_sha256,
+                            }
+                            for pack in accepted_packs
+                        },
+                    }
+                    signed_review, review_signature = self._signed_json(
+                        review_snapshot
+                    )
                     page = (
                         _review_detail(
                             update,
                             self._csrf(path),
-                            tuple(promotion.packs.list()),
+                            signed_review,
+                            review_signature,
+                            accepted_packs,
                         )
                         if promotion is not None
                         else _readonly_detail(update)
@@ -131,44 +154,44 @@ def make_server(
                     raise PromotionError("CSRF token is invalid")
                 if action == "preview":
                     update = repository.get(update_id)
+                    review_snapshot = self._verified_json(
+                        fields,
+                        "signed-review",
+                        "review-signature",
+                    )
+                    self._validate_review_snapshot(review_snapshot, update)
                     decisions = tuple(
                         _decision_from_form(fields, index)
                         for index, _ in enumerate(update.proposed_claims)
                     )
                     target_id = self._one(fields, "target-pack-id").strip()
                     target_title = self._one(fields, "target-pack-title").strip()
-                    review = promotion.review(
-                        update_id,
-                        target_pack_id=target_id,
-                        target_pack_title=target_title,
-                    )
+                    base = review_snapshot["packs"].get(target_id)
+                    if base is not None and base["title"] != target_title:
+                        raise StalePromotionError(
+                            "target Learning Pack title differs from the reviewed base"
+                        )
                     plan = PromotionPlan(
                         update_id=update_id,
                         proposal_sha256=update.proposal_sha256,
                         target_pack_id=target_id,
                         target_pack_title=target_title,
-                        expected_base_version=review.expected_base_version,
-                        expected_base_sha256=review.expected_base_sha256,
+                        expected_base_version=(
+                            base["version"] if base is not None else None
+                        ),
+                        expected_base_sha256=(
+                            base["content_sha256"] if base is not None else None
+                        ),
                         decisions=decisions,
                     )
                     preview = promotion.preview(plan)
-                    encoded_plan = json.dumps(
-                        plan.to_dict(),
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                        sort_keys=True,
-                    ).encode("utf-8")
-                    signed_plan = base64.urlsafe_b64encode(encoded_plan).decode("ascii")
-                    signature = hmac.new(
-                        server_key,
-                        encoded_plan,
-                        sha256,
-                    ).hexdigest()
+                    signed_plan, signature = self._signed_json(plan.to_dict())
                     self._send(
                         HTTPStatus.OK,
                         _preview_page(
                             update,
                             plan,
+                            preview.changes,
                             preview.preview_sha256,
                             self._csrf(f"/updates/{update_id}"),
                             signed_plan,
@@ -179,22 +202,13 @@ def make_server(
 
                 if self._one(fields, "confirm") != "yes":
                     raise PromotionError("explicit Promotion confirmation is required")
-                encoded_plan = base64.b64decode(
-                    self._one(fields, "signed-plan").encode("ascii"),
-                    altchars=b"-_",
-                    validate=True,
+                plan = promotion.plan_from_dict(
+                    self._verified_json(
+                        fields,
+                        "signed-plan",
+                        "plan-signature",
+                    )
                 )
-                expected_signature = hmac.new(
-                    server_key,
-                    encoded_plan,
-                    sha256,
-                ).hexdigest()
-                if not hmac.compare_digest(
-                    self._one(fields, "plan-signature"),
-                    expected_signature,
-                ):
-                    raise PromotionError("Promotion preview integrity check failed")
-                plan = promotion.plan_from_dict(json.loads(encoded_plan))
                 if plan.update_id != update_id:
                     raise PromotionError("Promotion route does not match the plan")
                 result = promotion.commit(
@@ -278,6 +292,71 @@ def make_server(
                 raise PromotionError(f"{name} must appear exactly once")
             return values[0]
 
+        @staticmethod
+        def _validate_review_snapshot(
+            value: object,
+            update,
+        ) -> None:
+            if not isinstance(value, dict) or set(value) != {
+                "schema_version",
+                "update_id",
+                "proposal_sha256",
+                "packs",
+            }:
+                raise PromotionError("review snapshot does not match the schema")
+            if (
+                value["schema_version"] != 1
+                or value["update_id"] != update.update_id
+                or value["proposal_sha256"] != update.proposal_sha256
+                or not isinstance(value["packs"], dict)
+            ):
+                raise StalePromotionError("staged review snapshot is stale")
+            for pack_id, base in value["packs"].items():
+                if not isinstance(pack_id, str) or not isinstance(base, dict):
+                    raise PromotionError("review pack base does not match the schema")
+                if set(base) != {"title", "version", "content_sha256"}:
+                    raise PromotionError("review pack base does not match the schema")
+                if (
+                    not isinstance(base["title"], str)
+                    or not isinstance(base["version"], int)
+                    or isinstance(base["version"], bool)
+                    or base["version"] < 1
+                    or not isinstance(base["content_sha256"], str)
+                    or len(base["content_sha256"]) != 64
+                ):
+                    raise PromotionError("review pack base does not match the schema")
+
+        @staticmethod
+        def _signed_json(value: object) -> tuple[str, str]:
+            encoded = json.dumps(
+                value,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            signed = base64.urlsafe_b64encode(encoded).decode("ascii")
+            signature = hmac.new(server_key, encoded, sha256).hexdigest()
+            return signed, signature
+
+        @staticmethod
+        def _verified_json(
+            fields: dict[str, list[str]],
+            value_name: str,
+            signature_name: str,
+        ) -> object:
+            encoded = base64.b64decode(
+                Handler._one(fields, value_name).encode("ascii"),
+                altchars=b"-_",
+                validate=True,
+            )
+            expected = hmac.new(server_key, encoded, sha256).hexdigest()
+            if not hmac.compare_digest(
+                Handler._one(fields, signature_name),
+                expected,
+            ):
+                raise PromotionError("signed review integrity check failed")
+            return json.loads(encoded)
+
         def _method_not_allowed(self) -> None:
             self.send_response(HTTPStatus.METHOD_NOT_ALLOWED)
             allowed = "GET, HEAD, POST" if promotion is not None else "GET, HEAD"
@@ -298,18 +377,9 @@ def make_server(
                 return False
 
         def _trusted_origin(self) -> bool:
-            try:
-                origin = urlsplit(self.headers.get("Origin", ""))
-                return (
-                    origin.scheme == "http"
-                    and origin.hostname in {"127.0.0.1", "localhost"}
-                    and origin.port == self.server.server_address[1]
-                    and not origin.path
-                    and not origin.query
-                    and not origin.fragment
-                )
-            except ValueError:
-                return False
+            return self.headers.get("Origin", "") == (
+                f"http://{self.headers.get('Host', '')}"
+            )
 
         def _csrf(self, path: str) -> str:
             return hmac.new(server_key, path.encode("utf-8"), sha256).hexdigest()
@@ -336,10 +406,11 @@ def make_server(
             self.send_header("Cache-Control", "no-store")
             self.send_header(
                 "Content-Security-Policy",
-                "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'",
+                "default-src 'none'; style-src 'unsafe-inline'; "
+                "form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
             )
             self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Referrer-Policy", "same-origin")
             self.send_header("X-Frame-Options", "DENY")
             self.end_headers()
             if not head_only:

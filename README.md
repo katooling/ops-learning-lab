@@ -80,6 +80,17 @@ The verification command runs the black-box CLI and domain tests, Python
 compilation, relative-file link checks, the publication audit, and a clean
 editable-install smoke test.
 
+The optional test-only Chromium journey has its own explicit dependency step:
+
+```bash
+npm --prefix tests/browser ci
+(cd tests/browser && npx playwright install chromium)
+./scripts/verify-browser
+```
+
+CI runs this browser proof in a separate job. Playwright is not a product
+runtime dependency.
+
 ## Safety
 
 - Use only synthetic or sanitized material in this public repository.

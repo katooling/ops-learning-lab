@@ -165,6 +165,10 @@ class PromotionServiceTests(unittest.TestCase):
             retry = fixture.service.commit(plan, preview.preview_sha256)
             self.assertTrue(retry.already_applied)
             self.assertEqual(retry.pack, result.pack)
+            self.assertFalse(hasattr(fixture.packs, "write"))
+            self.assertFalse(hasattr(fixture.packs, "locked"))
+            self.assertFalse(hasattr(fixture.packs, "_write_promoted"))
+            self.assertFalse(hasattr(fixture.packs, "_locked_for_promotion"))
 
     def test_contradiction_preserves_earlier_claim_as_contradicted_history(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -267,6 +271,44 @@ class PromotionServiceTests(unittest.TestCase):
             ):
                 fixture.service.commit(different, different_preview.preview_sha256)
             self.assertEqual(fixture.packs.get("codex-etl").version, 1)
+
+    def test_exact_retry_survives_missing_stage_while_different_command_conflicts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = PromotionFixture(directory)
+            update = fixture.stage(
+                "Codex ETL usage.\nClaim: Retry synthetic fact.\n",
+                "retry-stage",
+            )
+            plan = fixture.plan(
+                update,
+                (
+                    accept(
+                        update.proposed_claims[0].proposal_id,
+                        "Retry reviewed synthetic fact.",
+                    ),
+                ),
+            )
+            preview = fixture.service.preview(plan)
+            fixture.service.commit(plan, preview.preview_sha256)
+            (
+                fixture.updates.root / f"{update.update_id}.json"
+            ).unlink()
+
+            retry = fixture.service.commit(plan, preview.preview_sha256)
+            self.assertTrue(retry.already_applied)
+            changed = PromotionPlan(
+                **{
+                    **plan.to_dict(),
+                    "decisions": (
+                        accept(
+                            update.proposed_claims[0].proposal_id,
+                            "Different retry wording.",
+                        ),
+                    ),
+                }
+            )
+            with self.assertRaisesRegex(StalePromotionError, "different Promotion"):
+                fixture.service.commit(changed, preview.preview_sha256)
 
     def test_concurrent_different_decisions_on_one_update_have_one_winner(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -462,6 +504,44 @@ class PromotionServiceTests(unittest.TestCase):
                 [],
             )
 
+    def test_directory_fsync_failure_after_replace_returns_committed_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = PromotionFixture(directory)
+            update = fixture.stage(
+                "Codex ETL usage.\nClaim: Durable synthetic fact.\n",
+                "post-replace-sync",
+            )
+            plan = fixture.plan(
+                update,
+                (
+                    accept(
+                        update.proposed_claims[0].proposal_id,
+                        "Durably reviewed synthetic fact.",
+                    ),
+                ),
+            )
+            preview = fixture.service.preview(plan)
+            real_fsync = os.fsync
+            calls = 0
+
+            def fail_directory_sync(descriptor):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("synthetic directory fsync failure")
+                return real_fsync(descriptor)
+
+            with mock.patch(
+                "ops_learning_lab.storage.os.fsync",
+                side_effect=fail_directory_sync,
+            ):
+                result = fixture.service.commit(plan, preview.preview_sha256)
+
+            self.assertFalse(result.already_applied)
+            self.assertEqual(fixture.packs.get("codex-etl"), result.pack)
+            retry = fixture.service.commit(plan, preview.preview_sha256)
+            self.assertTrue(retry.already_applied)
+
     def test_malformed_and_private_only_accepted_text_fail_before_write(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = PromotionFixture(directory)
@@ -513,6 +593,99 @@ class PromotionServiceTests(unittest.TestCase):
             with self.assertRaisesRegex(SchemaError, "action"):
                 PromotionPlan.from_dict(malformed_decision)
 
+    def test_structural_private_markers_fail_when_loading_accepted_pack(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = PromotionFixture(directory)
+            update = fixture.stage(
+                "Codex ETL usage.\nClaim: Load synthetic fact.\n",
+                "load-private-marker",
+            )
+            plan = fixture.plan(
+                update,
+                (
+                    accept(
+                        update.proposed_claims[0].proposal_id,
+                        "Safely reviewed load fact.",
+                    ),
+                ),
+            )
+            fixture.service.commit(
+                plan,
+                fixture.service.preview(plan).preview_sha256,
+            )
+            pack_path = fixture.home.root / "packs" / "codex-etl" / "pack.json"
+            value = json.loads(pack_path.read_text(encoding="utf-8"))
+            value["claims"][0]["text"] = f"Expose {update.intake_id}"
+            # Recalculate neither digest nor model: structural validation must fire first.
+            pack_path.write_text(json.dumps(value), encoding="utf-8")
+            with self.assertRaisesRegex(SchemaError, "does not match the schema"):
+                fixture.packs.get("codex-etl")
+
+    def test_configured_exact_canary_blocks_preview_before_any_pack_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = PromotionFixture(directory)
+            canary = "opaque-learning-marker-71fcd"
+            service = PromotionService(
+                fixture.updates,
+                fixture.packs,
+                clock=lambda: NOW,
+                forbidden_canaries=(canary,),
+            )
+            update = fixture.stage(
+                "Codex ETL usage.\nClaim: Canary candidate.\n",
+                "configured-canary",
+            )
+            plan = fixture.plan(
+                update,
+                (
+                    accept(
+                        update.proposed_claims[0].proposal_id,
+                        f"Reviewed text with {canary}.",
+                    ),
+                ),
+            )
+            with self.assertRaisesRegex(PromotionError, "configured private canary"):
+                service.preview(plan)
+            self.assertIsNone(fixture.packs.get("codex-etl"))
+
+    def test_preview_change_summary_is_deterministic_and_classified(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = PromotionFixture(directory)
+            update = fixture.stage(
+                "Codex ETL usage.\n"
+                "Claim [current]: First summary fact.\n"
+                "Claim [historical]: Second summary fact.\n",
+                "summary",
+            )
+            plan = fixture.plan(
+                update,
+                (
+                    accept(
+                        update.proposed_claims[0].proposal_id,
+                        "First generalized summary fact.",
+                    ),
+                    reject(update.proposed_claims[1].proposal_id, "not-relevant"),
+                ),
+            )
+            first = fixture.service.preview(plan).changes
+            second = fixture.service.preview(plan).changes
+            self.assertEqual(first, second)
+            self.assertEqual(
+                first.removed,
+                (update.proposed_claims[1].proposal_id,),
+            )
+            self.assertEqual(
+                first.retained,
+                (
+                    f"{update.proposed_claims[0].proposal_id}:safe-provenance",
+                    f"{update.proposed_claims[0].proposal_id}:fact-status",
+                ),
+            )
+            self.assertEqual(
+                first.generalized,
+                (f"{update.proposed_claims[0].proposal_id}:text",),
+            )
+
     @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO files are not supported")
     def test_pack_symlink_and_fifo_hazards_fail_without_blocking(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -558,6 +731,10 @@ class PromotionHttpJourneyTests(unittest.TestCase):
                 review_body = response.read().decode("utf-8")
                 self.assertEqual(response.status, 200)
                 self.assertIn("Review staged content", review_body)
+                csp = response.getheader("Content-Security-Policy", "")
+                self.assertIn("frame-ancestors 'none'", csp)
+                self.assertIn("base-uri 'none'", csp)
+                self.assertEqual(response.getheader("Referrer-Policy"), "same-origin")
                 self.assertIn("<fieldset>", review_body)
                 self.assertIn("<legend>", review_body)
                 self.assertIn('name="claim-0-action" value="accept"', review_body)
@@ -574,6 +751,14 @@ class PromotionHttpJourneyTests(unittest.TestCase):
 
                 form = {
                     "csrf-token": csrf,
+                    "signed-review": re.search(
+                        r'name="signed-review" value="([^"]+)"',
+                        review_body,
+                    ).group(1),
+                    "review-signature": re.search(
+                        r'name="review-signature" value="([^"]+)"',
+                        review_body,
+                    ).group(1),
                     "target-pack-id": "codex-etl",
                     "target-pack-title": "Synthetic Codex ETL",
                     "claim-0-proposal-id": update.proposed_claims[0].proposal_id,
@@ -620,6 +805,22 @@ class PromotionHttpJourneyTests(unittest.TestCase):
                 csrf_body = csrf_response.read().decode("utf-8")
                 self.assertEqual(csrf_response.status, 400)
                 self.assertIn("CSRF token is invalid", csrf_body)
+                self.assertIsNone(fixture.packs.get("codex-etl"))
+
+                tampered_review = {
+                    **form,
+                    "review-signature": "0" * 64,
+                }
+                connection.request(
+                    "POST",
+                    f"/updates/{update.update_id}/preview",
+                    urlencode(tampered_review),
+                    headers,
+                )
+                signed_response = connection.getresponse()
+                signed_body = signed_response.read().decode("utf-8")
+                self.assertEqual(signed_response.status, 400)
+                self.assertIn("signed review integrity check failed", signed_body)
                 self.assertIsNone(fixture.packs.get("codex-etl"))
 
                 connection.request(
@@ -673,7 +874,7 @@ class PromotionHttpJourneyTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=2)
 
-    def test_stale_http_confirmation_returns_409_and_preserves_entered_decision(self):
+    def test_get_review_base_change_returns_409_before_preview_and_preserves_input(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = PromotionFixture(directory)
             initial = fixture.stage(
@@ -727,6 +928,14 @@ class PromotionHttpJourneyTests(unittest.TestCase):
                 entered = "Preserve this entered reviewed wording."
                 form = {
                     "csrf-token": csrf,
+                    "signed-review": re.search(
+                        r'name="signed-review" value="([^"]+)"',
+                        body,
+                    ).group(1),
+                    "review-signature": re.search(
+                        r'name="review-signature" value="([^"]+)"',
+                        body,
+                    ).group(1),
                     "target-pack-id": "codex-etl",
                     "target-pack-title": "Synthetic Codex ETL",
                     "claim-0-proposal-id": stale.proposed_claims[0].proposal_id,
@@ -738,29 +947,6 @@ class PromotionHttpJourneyTests(unittest.TestCase):
                     "claim-0-sensitivity": "reviewed",
                     "claim-0-reason": "",
                 }
-                connection.request(
-                    "POST",
-                    f"/updates/{stale.update_id}/preview",
-                    urlencode(form),
-                    headers,
-                )
-                preview_response = connection.getresponse()
-                preview_body = preview_response.read().decode("utf-8")
-                self.assertEqual(preview_response.status, 200)
-                hidden = {
-                    name: re.search(
-                        rf'name="{name}" value="([^"]+)"',
-                        preview_body,
-                    ).group(1)
-                    for name in (
-                        "csrf-token",
-                        "signed-plan",
-                        "plan-signature",
-                        "preview-sha256",
-                    )
-                }
-                hidden["confirm"] = "yes"
-
                 intervening_plan = fixture.plan(
                     intervening,
                     (
@@ -777,8 +963,8 @@ class PromotionHttpJourneyTests(unittest.TestCase):
 
                 connection.request(
                     "POST",
-                    f"/updates/{stale.update_id}/promote",
-                    urlencode(hidden),
+                    f"/updates/{stale.update_id}/preview",
+                    urlencode(form),
                     headers,
                 )
                 conflict = connection.getresponse()
@@ -842,6 +1028,41 @@ class PromotionCliJourneyTests(unittest.TestCase):
             self.assertEqual(commit.returncode, 0, commit.stderr)
             self.assertEqual(json.loads(commit.stdout)["status"], "promoted")
             self.assertEqual(fixture.packs.get("codex-etl").version, 1)
+
+    def test_cli_configured_canary_file_blocks_preview(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = PromotionFixture(directory)
+            canary = "cli-opaque-canary-91da7"
+            update = fixture.stage(
+                "Codex ETL usage.\nClaim: CLI canary draft.\n",
+                "cli-canary",
+            )
+            plan = fixture.plan(
+                update,
+                (
+                    accept(
+                        update.proposed_claims[0].proposal_id,
+                        f"Reviewed text contains {canary}.",
+                    ),
+                ),
+            )
+            plan_path = fixture.root / "plan.json"
+            plan_path.write_text(json.dumps(plan.to_dict()), encoding="utf-8")
+            canary_path = fixture.root / "canary.txt"
+            canary_path.write_text(canary, encoding="utf-8")
+
+            preview = run_cli(
+                "promotion-preview",
+                "--home",
+                str(fixture.home.root),
+                "--plan",
+                str(plan_path),
+                "--forbidden-canary-file",
+                str(canary_path),
+            )
+            self.assertEqual(preview.returncode, 1)
+            self.assertIn("configured private canary", preview.stderr)
+            self.assertIsNone(fixture.packs.get("codex-etl"))
 
 
 if __name__ == "__main__":

@@ -59,6 +59,13 @@ def _parser() -> argparse.ArgumentParser:
     serve.add_argument("--home", type=Path, required=True)
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument(
+        "--forbidden-canary-file",
+        type=Path,
+        action="append",
+        default=[],
+        help="block exact UTF-8 canary text from accepted pack state",
+    )
 
     review = subcommands.add_parser(
         "promotion-review", help="inspect one immutable staged update and pack base"
@@ -73,6 +80,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     preview.add_argument("--home", type=Path, required=True)
     preview.add_argument("--plan", type=Path, required=True)
+    preview.add_argument(
+        "--forbidden-canary-file",
+        type=Path,
+        action="append",
+        default=[],
+    )
 
     promote = subcommands.add_parser(
         "promotion-commit", help="atomically commit a previously previewed plan"
@@ -80,6 +93,12 @@ def _parser() -> argparse.ArgumentParser:
     promote.add_argument("--home", type=Path, required=True)
     promote.add_argument("--plan", type=Path, required=True)
     promote.add_argument("--preview-sha256", required=True)
+    promote.add_argument(
+        "--forbidden-canary-file",
+        type=Path,
+        action="append",
+        default=[],
+    )
     return parser
 
 
@@ -115,10 +134,23 @@ def _read_capture_input(path: Path) -> bytes:
     return content
 
 
-def _promotion_service(home: LearningHome) -> PromotionService:
+def _promotion_service(
+    home: LearningHome,
+    canary_files: Sequence[Path] = (),
+) -> PromotionService:
+    canaries: list[str] = []
+    for path in canary_files:
+        try:
+            canary = _read_capture_input(path).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise StorageError("forbidden canary files must be UTF-8") from exc
+        if not canary:
+            raise StorageError("forbidden canary files must not be empty")
+        canaries.append(canary)
     return PromotionService(
         PackUpdateRepository.open(home.root),
         PackRepository.open(home.root),
+        forbidden_canaries=tuple(canaries),
     )
 
 
@@ -181,7 +213,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.command == "serve":
             home = LearningHome.open(arguments.home)
             repository = PackUpdateRepository.open(home.root)
-            service = _promotion_service(home)
+            service = _promotion_service(home, arguments.forbidden_canary_file)
             server = make_server(
                 repository,
                 arguments.host,
@@ -225,7 +257,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if arguments.command == "promotion-preview":
             home = LearningHome.open(arguments.home)
-            service = _promotion_service(home)
+            service = _promotion_service(home, arguments.forbidden_canary_file)
             plan = _read_plan(service, arguments.plan)
             preview = service.preview(plan)
             _emit(
@@ -234,6 +266,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "promotion_id": plan.promotion_id,
                     "preview_sha256": preview.preview_sha256,
                     "resulting_pack": preview.resulting_pack.to_dict(),
+                    "changes": {
+                        "removed": list(preview.changes.removed),
+                        "retained": list(preview.changes.retained),
+                        "generalized": list(preview.changes.generalized),
+                    },
                     "written": False,
                 }
             )
@@ -241,7 +278,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if arguments.command == "promotion-commit":
             home = LearningHome.open(arguments.home)
-            service = _promotion_service(home)
+            service = _promotion_service(home, arguments.forbidden_canary_file)
             plan = _read_plan(service, arguments.plan)
             result = service.commit(plan, arguments.preview_sha256)
             _emit(

@@ -17,7 +17,12 @@ from .promotion_models import (
     LearningPack,
     PromotionRecord,
 )
-from .storage import StorageError, _read_confined_regular_file, _write_atomic
+from .storage import (
+    PostReplaceSyncError,
+    StorageError,
+    _read_confined_regular_file,
+    _write_atomic,
+)
 
 try:
     import fcntl as _fcntl
@@ -28,8 +33,12 @@ except ImportError:  # pragma: no cover - Windows keeps the in-process lock.
 _PROMOTION_LOCK = RLock()
 
 
+class UncertainPromotionCommit(StorageError):
+    """The replacement happened but its exact visible state cannot be proven."""
+
+
 class PackRepository:
-    """Safe accepted-pack persistence with one cross-process promotion lock."""
+    """Read-only capability for validated accepted Learning Packs."""
 
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -81,8 +90,12 @@ class PackRepository:
         pack = self.get(pack_id)
         return AcceptedPackSnapshot.from_pack(pack) if pack is not None else None
 
+
+class _PromotionPackStore(PackRepository):
+    """Package-private write capability held only by PromotionService."""
+
     @contextmanager
-    def locked(self) -> Iterator[None]:
+    def _locked_for_promotion(self) -> Iterator[None]:
         lock_path = self.root / ".promotion.lock"
         with _PROMOTION_LOCK:
             flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
@@ -101,7 +114,7 @@ class PackRepository:
             finally:
                 os.close(descriptor)
 
-    def write(self, pack: LearningPack) -> None:
+    def _write_promoted(self, pack: LearningPack) -> None:
         path = self._path(pack.pack_id)
         pack_root = path.parent
         if pack_root.exists() and not pack_root.is_dir():
@@ -119,6 +132,22 @@ class PackRepository:
         ).encode("utf-8")
         try:
             _write_atomic(path, encoded, 0o600)
+        except PostReplaceSyncError as exc:
+            try:
+                visible = _read_confined_regular_file(
+                    path,
+                    pack_root,
+                    "Learning Pack",
+                )
+            except StorageError as read_error:
+                raise UncertainPromotionCommit(
+                    "Promotion replacement happened but its visible state is uncertain"
+                ) from read_error
+            if visible == encoded:
+                return
+            raise UncertainPromotionCommit(
+                "Promotion replacement happened but intended bytes are not visible"
+            ) from exc
         except BaseException:
             if created:
                 try:
@@ -127,7 +156,7 @@ class PackRepository:
                     pass
             raise
 
-    def find_promotion_by_update(
+    def _find_promotion_by_update(
         self,
         update_id: str,
     ) -> tuple[LearningPack, PromotionRecord] | None:

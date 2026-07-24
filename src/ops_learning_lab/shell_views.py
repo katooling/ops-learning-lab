@@ -5,7 +5,7 @@ from __future__ import annotations
 from html import escape
 
 from .domain import PackMatch, StagedPackUpdate
-from .promotion import PromotionService
+from .promotion import PromotionChangeSummary, PromotionService
 from .promotion_models import (
     LearningPack,
     PromotionDecision,
@@ -149,6 +149,8 @@ def _readonly_detail(update: StagedPackUpdate) -> bytes:
 def _review_detail(
     update: StagedPackUpdate,
     csrf_token: str,
+    signed_review: str = "",
+    review_signature: str = "",
     accepted_packs: tuple[LearningPack, ...] = (),
 ) -> bytes:
     claim_fields = []
@@ -223,6 +225,8 @@ def _review_detail(
         + "<form method=\"post\" "
         f'action="/updates/{escape(update.update_id)}/preview">'
         f'<input type="hidden" name="csrf-token" value="{escape(csrf_token)}">'
+        f'<input type="hidden" name="signed-review" value="{escape(signed_review)}">'
+        f'<input type="hidden" name="review-signature" value="{escape(review_signature)}">'
         "<fieldset><legend>Choose the accepted Learning Pack</legend>"
         "<p>No destination is selected automatically. Use a candidate shown above "
         "or enter a new pack for a new-pack proposal.</p>"
@@ -285,6 +289,7 @@ def _decision_from_form(
 def _preview_page(
     update: StagedPackUpdate,
     plan: PromotionPlan,
+    changes: PromotionChangeSummary,
     preview_sha256: str,
     csrf_token: str,
     signed_plan: str,
@@ -318,6 +323,12 @@ def _preview_page(
         + "</article>"
         for decision in plan.decisions
     )
+
+    def summary_items(items: tuple[str, ...]) -> str:
+        return "".join(f"<li><code>{escape(item)}</code></li>" for item in items) or (
+            "<li>None</li>"
+        )
+
     return _layout(
         "Preview Promotion",
         "<h1>Preview Promotion</h1>"
@@ -325,6 +336,11 @@ def _preview_page(
         "Confirm only after checking the exact accepted text and history choices.</aside>"
         f"<p>Target: <strong>{escape(plan.target_pack_title)}</strong> "
         f"(<code>{escape(plan.target_pack_id)}</code>)</p>"
+        "<section><h2>Deterministic change summary</h2>"
+        f"<h3>Removed</h3><ul>{summary_items(changes.removed)}</ul>"
+        f"<h3>Retained</h3><ul>{summary_items(changes.retained)}</ul>"
+        f"<h3>Generalized</h3><ul>{summary_items(changes.generalized)}</ul>"
+        "</section>"
         f"<section><h2>Exact decisions</h2>{decisions}</section>"
         f'<form method="post" action="/updates/{escape(plan.update_id)}/promote">'
         f'<input type="hidden" name="csrf-token" value="{escape(csrf_token)}">'

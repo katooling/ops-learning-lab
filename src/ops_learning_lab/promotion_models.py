@@ -70,6 +70,14 @@ def _canonical_sha256(value: dict[str, Any]) -> str:
     return sha256(encoded).hexdigest()
 
 
+def _validate_publishable_text(value: Any, field: str) -> str:
+    """Reject structural private-storage markers in every accepted text field."""
+    text = _non_empty(value, field)
+    if any(pattern.search(text) for pattern in UNSAFE_ACCEPTED_TEXT):
+        raise SchemaError(f"{field} contains private-only metadata")
+    return text
+
+
 @dataclass(frozen=True, slots=True)
 class PromotionDecision:
     """One explicit learner decision for one immutable proposal."""
@@ -114,11 +122,9 @@ class PromotionDecision:
             raise SchemaError("an accepted proposal cannot have a rejection reason")
         if self.sensitivity_reviewed is not True:
             raise SchemaError("accepted text needs an explicit sensitivity review")
-        text = _non_empty(self.sanitized_text, "sanitized_text")
+        text = _validate_publishable_text(self.sanitized_text, "sanitized_text")
         if text != text.strip():
             raise SchemaError("sanitized_text cannot have surrounding whitespace")
-        if any(pattern.search(text) for pattern in UNSAFE_ACCEPTED_TEXT):
-            raise SchemaError("sanitized_text contains private-only metadata")
         if (
             not isinstance(self.fact_status, str)
             or self.fact_status not in FACT_STATUSES
@@ -282,7 +288,7 @@ class AcceptedProvenance:
     proposal_id: str
 
     def __post_init__(self) -> None:
-        _non_empty(self.source_type, "accepted source_type")
+        _validate_publishable_text(self.source_type, "accepted source_type")
         _rfc3339(self.observed_at, "accepted observed_at")
         if not isinstance(self.staged_update_id, str) or not re.fullmatch(
             r"update-[0-9a-f]{20}", self.staged_update_id
@@ -327,7 +333,9 @@ class AcceptedClaim:
             self.claim_id
         ):
             raise SchemaError("claim_id does not match the schema")
-        _non_empty(self.text, "accepted claim text")
+        text = _validate_publishable_text(self.text, "accepted claim text")
+        if text != text.strip():
+            raise SchemaError("accepted claim text cannot have surrounding whitespace")
         if (
             not isinstance(self.fact_status, str)
             or self.fact_status not in FACT_STATUSES
@@ -491,7 +499,7 @@ class LearningPack:
             self.pack_id
         ):
             raise SchemaError("pack_id does not match the schema")
-        _non_empty(self.title, "pack title")
+        _validate_publishable_text(self.title, "pack title")
         if (
             not isinstance(self.version, int)
             or isinstance(self.version, bool)
@@ -614,7 +622,7 @@ class AcceptedPackSnapshot:
             self.pack_id
         ):
             raise SchemaError("snapshot pack_id does not match the schema")
-        _non_empty(self.title, "snapshot title")
+        _validate_publishable_text(self.title, "snapshot title")
         if (
             not isinstance(self.version, int)
             or isinstance(self.version, bool)

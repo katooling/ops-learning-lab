@@ -32,6 +32,11 @@ Rejected source text stays in private staging and is not copied to the pack.
 The single file is intentional in version one: accepted state and the decision
 record cannot be partially committed.
 
+Structural private-text rules run both when a Promotion decision is created and
+when an accepted pack is constructed or loaded. Configured exact canaries run
+against the full next pack before write. Human review remains necessary because
+no structural or canary rule can recognize arbitrary private meaning.
+
 ## Read-only consumer seam
 
 Consumers that teach or export call:
