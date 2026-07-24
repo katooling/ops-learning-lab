@@ -69,7 +69,11 @@ def _read_confined_regular_file(path: Path, parent: Path, label: str) -> bytes:
     except (OSError, ValueError) as exc:
         raise StorageError(f"{label} is missing or escapes its intake") from exc
 
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:

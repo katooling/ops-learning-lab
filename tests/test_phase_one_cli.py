@@ -238,6 +238,55 @@ class PhaseOneCliTests(unittest.TestCase):
             ):
                 home.capture(content, source)
 
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO files are not supported")
+    def test_read_manifest_rejects_fifo_without_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = LearningHome.initialize(root / "learning-home")
+            source = SourceReference(
+                source_type="pasted-text",
+                source_id="manifest-fifo",
+                observed_at="2026-07-24T12:00:00Z",
+            )
+            manifest = home.capture(b"safe source\n", source)
+            manifest_path = (
+                home.root
+                / "private"
+                / "inbox"
+                / manifest.intake_id
+                / "manifest.json"
+            )
+            manifest_path.unlink()
+            os.mkfifo(manifest_path)
+
+            with self.assertRaisesRegex(
+                StorageError, "intake manifest is not a regular file"
+            ):
+                home.read_manifest(manifest.intake_id)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO files are not supported")
+    def test_existing_capture_rejects_raw_fifo_without_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = LearningHome.initialize(root / "learning-home")
+            content = b"safe source\n"
+            source = SourceReference(
+                source_type="pasted-text",
+                source_id="raw-fifo",
+                observed_at="2026-07-24T12:00:00Z",
+            )
+            manifest = home.capture(content, source)
+            raw_path = (
+                home.root / "private" / "inbox" / manifest.intake_id / "raw.bin"
+            )
+            raw_path.unlink()
+            os.mkfifo(raw_path)
+
+            with self.assertRaisesRegex(
+                StorageError, "raw intake file is not a regular file"
+            ):
+                home.capture(content, source)
+
     def test_failed_staged_capture_leaves_no_partial_intake(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             home_path = Path(directory) / "learning-home"
