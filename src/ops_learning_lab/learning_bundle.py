@@ -248,7 +248,7 @@ class Choice:
 
 
 @dataclass(frozen=True, slots=True)
-class Prediction:
+class PredictionPrompt:
     prompt: str
     choices: tuple[Choice, ...]
     expected_choice_id: str
@@ -269,7 +269,7 @@ class Prediction:
         }
 
     @classmethod
-    def from_dict(cls, value: Any) -> Prediction:
+    def from_dict(cls, value: Any) -> PredictionPrompt:
         fields = _exact_object(
             value,
             {"prompt", "choices", "expected_choice_id"},
@@ -387,12 +387,12 @@ class EvidenceExercise:
 class ExplanationPrompt:
     prompt: str
     minimum_characters: int
-    qualification: Prediction
+    qualification: PredictionPrompt
 
     def __post_init__(self) -> None:
         _text(self.prompt, "explanation prompt")
         _positive_int(self.minimum_characters, "minimum_characters")
-        if not isinstance(self.qualification, Prediction):
+        if not isinstance(self.qualification, PredictionPrompt):
             raise SchemaError("explanation qualification does not match the schema")
 
     def to_dict(self) -> dict[str, Any]:
@@ -412,7 +412,7 @@ class ExplanationPrompt:
         return cls(
             prompt=fields["prompt"],
             minimum_characters=fields["minimum_characters"],
-            qualification=Prediction.from_dict(fields["qualification"]),
+            qualification=PredictionPrompt.from_dict(fields["qualification"]),
         )
 
 
@@ -464,7 +464,7 @@ class LessonBlueprint:
     claim_id: str
     outcome: LearningOutcome
     map_stages: tuple[MapStage, ...]
-    prediction: Prediction
+    prediction: PredictionPrompt
     activity: ActivitySpec
     evidence: EvidenceExercise
     explanation: ExplanationPrompt
@@ -485,7 +485,7 @@ class LessonBlueprint:
             tuple(stage.stage_id for stage in self.map_stages),
             "map stage identifiers",
         )
-        if not isinstance(self.prediction, Prediction):
+        if not isinstance(self.prediction, PredictionPrompt):
             raise SchemaError("lesson prediction does not match the schema")
         if not isinstance(self.activity, ActivitySpec):
             raise SchemaError("lesson activity does not match the schema")
@@ -526,7 +526,7 @@ class LessonBlueprint:
         claim_id: str,
         outcome: LearningOutcome,
         map_stages: tuple[MapStage, ...],
-        prediction: Prediction,
+        prediction: PredictionPrompt,
         activity: ActivitySpec,
         evidence: EvidenceExercise,
         explanation: ExplanationPrompt,
@@ -587,7 +587,7 @@ class LessonBlueprint:
                 MapStage.from_dict,
                 "map stages",
             ),
-            prediction=Prediction.from_dict(fields["prediction"]),
+            prediction=PredictionPrompt.from_dict(fields["prediction"]),
             activity=ActivitySpec.from_dict(fields["activity"]),
             evidence=EvidenceExercise.from_dict(fields["evidence"]),
             explanation=ExplanationPrompt.from_dict(fields["explanation"]),

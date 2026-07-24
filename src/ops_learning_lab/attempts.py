@@ -66,7 +66,7 @@ def _rfc3339(value: Any, field: str) -> str:
 
 
 @dataclass(frozen=True, slots=True)
-class Prediction:
+class PredictionResponse:
     choice_id: str
     confidence: int
 
@@ -81,7 +81,7 @@ class Prediction:
         }
 
     @classmethod
-    def from_dict(cls, value: Any) -> Prediction:
+    def from_dict(cls, value: Any) -> PredictionResponse:
         if not isinstance(value, dict) or set(value) != {
             "choice_id",
             "confidence",
@@ -248,7 +248,7 @@ class AttemptCheckpoint:
     started_at: str
     updated_at: str
     next_step: str
-    prediction: Prediction | None
+    prediction: PredictionResponse | None
     renderer: RendererCheckpoint
     evidence: tuple[EvidenceDecision, ...]
     explanation: Explanation | None
@@ -295,7 +295,7 @@ class AttemptCheckpoint:
         if self.next_step not in LOOP_STEPS:
             raise SchemaError("next_step does not match the schema")
         if self.prediction is not None and not isinstance(
-            self.prediction, Prediction
+            self.prediction, PredictionResponse
         ):
             raise SchemaError("attempt prediction does not match the schema")
         if not isinstance(self.renderer, RendererCheckpoint):
@@ -487,7 +487,7 @@ class AttemptCheckpoint:
             updated_at=value["updated_at"],
             next_step=value["next_step"],
             prediction=(
-                Prediction.from_dict(value["prediction"])
+                PredictionResponse.from_dict(value["prediction"])
                 if value["prediction"] is not None
                 else None
             ),

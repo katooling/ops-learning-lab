@@ -15,7 +15,7 @@ from ops_learning_lab.learning_bundle import (
     LearningOutcome,
     LessonBlueprint,
     MapStage,
-    Prediction,
+    PredictionPrompt,
     ScenarioAction,
 )
 from ops_learning_lab.promotion_models import (
@@ -71,7 +71,7 @@ def lesson() -> LessonBlueprint:
                 description="The safe record receives a normalized cost.",
             ),
         ),
-        prediction=Prediction(
+        prediction=PredictionPrompt(
             prompt="Which record should validation reject?",
             choices=(
                 Choice("negative-cost", "The record with a negative cost."),
@@ -132,7 +132,7 @@ def lesson() -> LessonBlueprint:
         explanation=ExplanationPrompt(
             prompt="Explain why job success is not enough evidence.",
             minimum_characters=24,
-            qualification=Prediction(
+            qualification=PredictionPrompt(
                 prompt="What does a successful job prove?",
                 choices=(
                     Choice("process-completed", "The process completed."),

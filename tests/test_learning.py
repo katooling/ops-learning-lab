@@ -19,7 +19,7 @@ from ops_learning_lab.attempts import (
     AttemptCheckpoint,
     EvidenceDecision,
     Explanation,
-    Prediction,
+    PredictionResponse,
     RendererCheckpoint,
 )
 from ops_learning_lab.bundle_repository import BundleRepository
@@ -113,7 +113,7 @@ def completed_attempt(
         started_at=NOW,
         updated_at="2026-07-24T12:05:00Z",
         next_step="complete",
-        prediction=Prediction(
+        prediction=PredictionResponse(
             choice_id=prediction_choice_id,
             confidence=4,
         ),
@@ -228,7 +228,7 @@ class LearnerAttemptContractTests(unittest.TestCase):
             started_at="2026-07-24T12:00:00Z",
             updated_at="2026-07-24T12:05:00Z",
             next_step="complete",
-            prediction=Prediction(
+            prediction=PredictionResponse(
                 choice_id="continues-with-duplicate",
                 confidence=4,
             ),
