@@ -77,11 +77,14 @@ class SourceReference:
         }
         if set(value) not in allowed:
             raise SchemaError("source fields do not match the schema")
+        retrieval_scope = value.get("retrieval_scope")
+        if "retrieval_scope" in value:
+            _require_non_empty(retrieval_scope, "retrieval_scope")
         return cls(
             source_type=value["source_type"],
             source_id=value["source_id"],
             observed_at=value["observed_at"],
-            retrieval_scope=value.get("retrieval_scope"),
+            retrieval_scope=retrieval_scope,
         )
 
 
