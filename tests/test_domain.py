@@ -21,6 +21,16 @@ class IntakeManifestTests(unittest.TestCase):
 
         self.assertEqual(IntakeManifest.from_dict(manifest.to_dict()), manifest)
 
+    def test_round_trip_preserves_explicit_retrieval_scope(self) -> None:
+        source = SourceReference(
+            source_type="codex-task",
+            source_id="synthetic-task-7",
+            observed_at="2026-07-24T12:00:00Z",
+            retrieval_scope="turn_ids:turn-2,turn-4",
+        )
+
+        self.assertEqual(SourceReference.from_dict(source.to_dict()), source)
+
     def test_unknown_fields_fail_closed(self) -> None:
         value = {
             "schema_version": 1,

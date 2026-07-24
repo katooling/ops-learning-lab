@@ -47,30 +47,41 @@ class SourceReference:
     source_type: str
     source_id: str
     observed_at: str
+    retrieval_scope: str | None = None
 
     def __post_init__(self) -> None:
         _require_non_empty(self.source_type, "source_type")
         _require_non_empty(self.source_id, "source_id")
         _require_rfc3339(self.observed_at, "observed_at")
+        if self.retrieval_scope is not None:
+            _require_non_empty(self.retrieval_scope, "retrieval_scope")
 
     def to_dict(self) -> dict[str, str]:
-        return {
+        value = {
             "source_type": self.source_type,
             "source_id": self.source_id,
             "observed_at": self.observed_at,
         }
+        if self.retrieval_scope is not None:
+            value["retrieval_scope"] = self.retrieval_scope
+        return value
 
     @classmethod
     def from_dict(cls, value: Any) -> SourceReference:
         if not isinstance(value, dict):
             raise SchemaError("source must be an object")
-        expected = {"source_type", "source_id", "observed_at"}
-        if set(value) != expected:
+        required = {"source_type", "source_id", "observed_at"}
+        allowed = {
+            frozenset(required),
+            frozenset((*required, "retrieval_scope")),
+        }
+        if set(value) not in allowed:
             raise SchemaError("source fields do not match the schema")
         return cls(
             source_type=value["source_type"],
             source_id=value["source_id"],
             observed_at=value["observed_at"],
+            retrieval_scope=value.get("retrieval_scope"),
         )
 
 
