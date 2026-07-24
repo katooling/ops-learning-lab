@@ -6,21 +6,24 @@ The first release is local-first. It captures source material into a private lea
 
 ## Current phase
 
-Phase one establishes the trust boundary:
+The first tracer establishes the capture and review boundary:
 
 ```text
 raw source -> private intake + provenance manifest
-                         |
-                         +-> privacy audit -> publishable areas
+        |       (unmarked raw lines stay private)
+        v
+deterministic match -> immutable staged proposal -> local review shell
 ```
 
-It does not yet generate lessons or provide the browser learner experience.
+It does not yet promote content or begin a lesson.
 
 ## Product documentation
 
 - [Domain language](CONTEXT.md)
 - [Version one product specification](docs/specs/v1.md)
 - [Architecture decisions](docs/adr/)
+- [Capture Mode guide](docs/capture-mode.md)
+- [Staged Pack Update contract](docs/staged-update-contract.md)
 - [Contributor and agent guidance](AGENTS.md)
 
 ## Requirements
@@ -28,7 +31,7 @@ It does not yet generate lessons or provide the browser learner experience.
 - Python 3.11 or newer
 - No third-party runtime dependencies
 
-## Try the phase-one tracer
+## Try the Capture Mode tracer
 
 ```bash
 python3 -m venv .venv
@@ -36,12 +39,24 @@ python3 -m venv .venv
 python -m pip install -e .
 
 opslearn init --home /tmp/ops-learning-home
-printf 'synthetic private note\n' > /tmp/source.txt
+cat >/tmp/source.txt <<'EOF'
+Synthetic Codex ETL usage and cost context.
+Claim: Normalized synthetic cost should be non-negative.
+EOF
 opslearn capture \
   --home /tmp/ops-learning-home \
   --source-type pasted-text \
   --source-id example-1 \
   --input /tmp/source.txt
+opslearn serve --home /tmp/ops-learning-home --port 8000
+```
+
+Open `http://127.0.0.1:8000/`. The shell shows only the staged proposal. It has
+no route for the raw intake.
+
+In another terminal, the privacy check remains available:
+
+```bash
 opslearn audit-privacy \
   --home /tmp/ops-learning-home \
   --canary-file /tmp/source.txt

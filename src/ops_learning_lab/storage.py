@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import errno
 from hashlib import sha256
 import json
 import os
@@ -13,11 +14,14 @@ import tempfile
 from typing import Iterable
 
 from .domain import ID_PATTERN, IntakeManifest, SourceReference
+from .json_contract import JsonContractError, decode_json_object
 
 
 MARKER_FILE = ".ops-learning-lab-home"
 PRIVATE_DIRECTORY = "private"
 PRIVATE_INBOX = Path(PRIVATE_DIRECTORY) / "inbox"
+STAGED_DIRECTORY = "staged"
+STAGED_UPDATES = Path(STAGED_DIRECTORY) / "updates"
 PUBLIC_DIRECTORIES = ("packs", "snapshots", "exports")
 
 
@@ -116,6 +120,18 @@ class LearningHome:
         os.chmod(inbox, 0o700)
         _require_owned_private_directory(private, candidate, "private directory")
         _require_owned_private_directory(inbox, candidate, "private inbox")
+        staged = candidate / STAGED_DIRECTORY
+        if staged.is_symlink():
+            raise StorageError("staged directory cannot be a symbolic link")
+        staged.mkdir(exist_ok=True)
+        os.chmod(staged, 0o700)
+        updates = candidate / STAGED_UPDATES
+        if updates.is_symlink():
+            raise StorageError("staged updates cannot be a symbolic link")
+        updates.mkdir(exist_ok=True)
+        os.chmod(updates, 0o700)
+        _require_owned_private_directory(staged, candidate, "staged directory")
+        _require_owned_private_directory(updates, candidate, "staged updates")
         for directory in PUBLIC_DIRECTORIES:
             target = candidate / directory
             if target.is_symlink():
@@ -141,6 +157,16 @@ class LearningHome:
         inbox = candidate / PRIVATE_INBOX
         _require_owned_private_directory(private, candidate, "private directory")
         _require_owned_private_directory(inbox, candidate, "private inbox")
+        _require_owned_private_directory(
+            candidate / STAGED_DIRECTORY,
+            candidate,
+            "staged directory",
+        )
+        _require_owned_private_directory(
+            candidate / STAGED_UPDATES,
+            candidate,
+            "staged updates",
+        )
         for directory in PUBLIC_DIRECTORIES:
             target = candidate / directory
             if target.is_symlink() or not target.is_dir():
@@ -217,7 +243,30 @@ class LearningHome:
             os.chmod(staging, 0o700)
             _write_atomic(staging / manifest.raw_file, content, 0o600)
             _write_atomic(staging / "manifest.json", manifest_bytes, 0o600)
-            staging.rename(destination)
+            try:
+                staging.rename(destination)
+            except OSError as exc:
+                if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
+                    raise
+                # Another identical capture won the atomic directory rename.
+                # The collision is accepted only after the winner is verified.
+                existing = self.read_manifest(intake_id)
+                if (
+                    existing.source.source_type != source.source_type
+                    or existing.source.source_id != source.source_id
+                    or existing.content_sha256 != content_digest
+                    or existing.byte_count != len(content)
+                    or _read_confined_regular_file(
+                        destination / existing.raw_file,
+                        destination,
+                        "raw intake file",
+                    )
+                    != content
+                ):
+                    raise StorageError(
+                        "concurrent intake identity collides with different content"
+                    )
+                return existing
         except BaseException:
             if staging.exists():
                 shutil.rmtree(staging)
@@ -243,10 +292,10 @@ class LearningHome:
                 intake,
                 "intake manifest",
             )
-            value = json.loads(manifest_bytes.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            value = decode_json_object(manifest_bytes, "intake manifest")
+            return IntakeManifest.from_dict(value)
+        except (JsonContractError, TypeError, ValueError) as exc:
             raise StorageError(f"cannot read manifest for {intake_id}") from exc
-        return IntakeManifest.from_dict(value)
 
     def audit_canary(self, canary: bytes) -> list[str]:
         if not canary:

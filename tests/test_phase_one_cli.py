@@ -214,6 +214,35 @@ class PhaseOneCliTests(unittest.TestCase):
             ):
                 home.read_manifest(manifest.intake_id)
 
+    def test_read_manifest_rejects_duplicate_json_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = LearningHome.initialize(Path(directory) / "learning-home")
+            source = SourceReference(
+                source_type="pasted-text",
+                source_id="duplicate-json-key",
+                observed_at="2026-07-24T12:00:00Z",
+            )
+            manifest = home.capture(b"safe source\n", source)
+            manifest_path = (
+                home.root
+                / "private"
+                / "inbox"
+                / manifest.intake_id
+                / "manifest.json"
+            )
+            encoded = manifest_path.read_text(encoding="utf-8")
+            manifest_path.write_text(
+                encoded.replace(
+                    '"schema_version": 1',
+                    '"schema_version": 1, "schema_version": 1',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(StorageError, "cannot read manifest"):
+                home.read_manifest(manifest.intake_id)
+
     def test_existing_capture_rejects_raw_file_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
