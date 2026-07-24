@@ -52,6 +52,14 @@ class BundleRepository:
             _BoundDirectory.open(root, "Learning Pack snapshot directory"),
         )
 
+    @classmethod
+    def from_directory(cls, directory: _BoundDirectory) -> BundleRepository:
+        """Take ownership of an already home-anchored snapshot directory."""
+
+        if not isinstance(directory, _BoundDirectory):
+            raise StorageError("bundle repository needs a bound directory")
+        return cls(directory.path, directory)
+
     def _leaf(self, bundle_sha256: str) -> str:
         if (
             not isinstance(bundle_sha256, str)
@@ -142,3 +150,12 @@ class BundleRepository:
                         "Learning Pack Bundle replacement is uncertain"
                     )
         return bundle
+
+    def close(self) -> None:
+        self._directory.close()
+
+    def __enter__(self) -> BundleRepository:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()

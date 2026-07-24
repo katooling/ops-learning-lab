@@ -5,157 +5,11 @@ import unittest
 
 from ops_learning_lab.domain import SchemaError
 from ops_learning_lab.learning_bundle import (
-    ActivitySpec,
-    Choice,
     Concept,
-    EvidenceCard,
-    EvidenceExercise,
-    ExplanationPrompt,
     LearningPackBundle,
-    LearningOutcome,
     LessonBlueprint,
-    MapStage,
-    PredictionPrompt,
-    ScenarioAction,
 )
-from ops_learning_lab.promotion_models import (
-    AcceptedClaim,
-    AcceptedPackSnapshot,
-    AcceptedProvenance,
-)
-
-
-def accepted_snapshot() -> AcceptedPackSnapshot:
-    return AcceptedPackSnapshot(
-        pack_id="synthetic-etl",
-        title="Synthetic ETL evidence",
-        version=1,
-        content_sha256="a" * 64,
-        claims=(
-            AcceptedClaim(
-                claim_id="claim-" + "1" * 20,
-                text="A normalized cost must not be negative.",
-                fact_status="current",
-                history_action="add",
-                target_claim_id=None,
-                provenance=AcceptedProvenance(
-                    source_type="synthetic-note",
-                    observed_at="2026-07-24T12:00:00Z",
-                    staged_update_id="update-" + "2" * 20,
-                    proposal_id="proposal-" + "3" * 20,
-                ),
-            ),
-        ),
-    )
-
-
-def lesson() -> LessonBlueprint:
-    return LessonBlueprint.build(
-        lesson_id="trace-one-record",
-        title="Trace one safe record",
-        concept_id="proof-scope",
-        claim_id="claim-" + "1" * 20,
-        outcome=LearningOutcome.build(
-            "select-exact-evidence",
-            "Select evidence that proves the exact operational claim.",
-        ),
-        map_stages=(
-            MapStage(
-                stage_id="source",
-                title="Source",
-                description="A synthetic response enters the pipeline.",
-            ),
-            MapStage(
-                stage_id="normalized",
-                title="Normalized data",
-                description="The safe record receives a normalized cost.",
-            ),
-        ),
-        prediction=PredictionPrompt(
-            prompt="Which record should validation reject?",
-            choices=(
-                Choice("negative-cost", "The record with a negative cost."),
-                Choice("fresh-record", "The fresh non-negative record."),
-            ),
-            expected_choice_id="negative-cost",
-        ),
-        activity=ActivitySpec(
-            scenario_id="synthetic-cost-validation",
-            instructions="Apply the validation rule to the two safe records.",
-            seed=7,
-            input_revision_sha256="4" * 64,
-            actions=(
-                ScenarioAction(
-                    "validate",
-                    "Validate records",
-                    "Produce deterministic validation observations.",
-                ),
-                ScenarioAction(
-                    "reset",
-                    "Reset",
-                    "Restore the same synthetic starting state.",
-                ),
-            ),
-            renderer_capabilities=(
-                "deterministic-reset/v1",
-                "evidence-producing-result/v1",
-                "keyboard-operable/v1",
-            ),
-        ),
-        evidence=EvidenceExercise(
-            claim="The invalid normalized record was rejected.",
-            cards=(
-                EvidenceCard(
-                    "validation-result",
-                    "Validation result",
-                    "The selected normalized record failed its rule.",
-                    "The downstream view refreshed.",
-                    "synthetic-validation-output",
-                    "one deterministic validation run",
-                    "public-synthetic",
-                    "2026-07-24T12:00:00Z",
-                ),
-                EvidenceCard(
-                    "job-success",
-                    "Job status",
-                    "The job process completed.",
-                    "Every business rule passed.",
-                    "synthetic-job-browser",
-                    "one process completion status",
-                    "public-synthetic",
-                    "2026-07-24T12:00:00Z",
-                ),
-            ),
-            required_support=("validation-result",),
-            required_reject=("job-success",),
-        ),
-        explanation=ExplanationPrompt(
-            prompt="Explain why job success is not enough evidence.",
-            minimum_characters=24,
-            qualification=PredictionPrompt(
-                prompt="What does a successful job prove?",
-                choices=(
-                    Choice("process-completed", "The process completed."),
-                    Choice("all-rules-passed", "Every business rule passed."),
-                ),
-                expected_choice_id="process-completed",
-            ),
-        ),
-    )
-
-
-def bundle() -> LearningPackBundle:
-    return LearningPackBundle.build(
-        accepted_snapshot(),
-        concepts=(
-            Concept(
-                concept_id="proof-scope",
-                title="Evidence scope",
-                summary="Match each operational claim to evidence of the same scope.",
-            ),
-        ),
-        lessons=(lesson(),),
-    )
+from tests.fixtures_learning import accepted_snapshot, bundle, lesson
 
 
 class LearningPackBundleTests(unittest.TestCase):
@@ -221,6 +75,12 @@ class LearningPackBundleTests(unittest.TestCase):
                 ),
                 lessons=(bad_lesson,),
             )
+
+    def test_bundle_rejects_a_different_accepted_snapshot(self) -> None:
+        current = accepted_snapshot()
+        stale = replace(current, version=current.version + 1)
+        with self.assertRaisesRegex(SchemaError, "does not match"):
+            bundle().require_snapshot(stale)
 
     def test_activity_requires_accessible_evidence_capabilities(self) -> None:
         with self.assertRaisesRegex(SchemaError, "required renderer capability"):

@@ -667,6 +667,19 @@ class LearningPackBundle:
     def to_dict(self) -> dict[str, Any]:
         return {**self._content_dict(), "bundle_sha256": self.bundle_sha256}
 
+    def require_snapshot(self, snapshot: AcceptedPackSnapshot) -> None:
+        """Reject stale or cross-pack bundle use before rendering."""
+        if not isinstance(snapshot, AcceptedPackSnapshot):
+            raise SchemaError("bundle requires an Accepted Pack snapshot")
+        if (
+            self.pack_id != snapshot.pack_id
+            or self.title != snapshot.title
+            or self.pack_version != snapshot.version
+            or self.accepted_snapshot_sha256 != snapshot.content_sha256
+            or self.claims != snapshot.claims
+        ):
+            raise SchemaError("bundle does not match the accepted pack snapshot")
+
     @classmethod
     def build(
         cls,

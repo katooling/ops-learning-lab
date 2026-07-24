@@ -40,7 +40,7 @@ rule can recognize arbitrary private meaning.
 
 ## Read-only consumer seam
 
-Consumers that teach or export call:
+Consumers that assemble lessons or prepare an export approval call:
 
 ```python
 snapshot = pack_repository.snapshot(pack_id)
@@ -51,7 +51,10 @@ and accepted claims. It does not expose Promotion methods, decision history,
 staged proposals, or raw intake.
 
 Exports must still use an explicit field allowlist. A snapshot is trusted
-accepted input, not permission to serialize implementation objects.
+accepted input, not permission to serialize implementation objects. An
+explicit export approval binds one complete bundle digest to this exact
+snapshot revision. After approval, later Pack versions do not rewrite or
+invalidate that historical binding.
 
 Future sanitized lessons, scenarios, and evidence can be added through an
 explicit schema version and snapshot field. They must not be smuggled through

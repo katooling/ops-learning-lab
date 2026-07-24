@@ -11,12 +11,20 @@ import stat
 import sys
 from typing import Sequence
 
-from .compiler import compile_update, validate_capture_text
 from .bundle_repository import BundleRepository
+from .compiler import compile_update, validate_capture_text
 from .domain import SchemaError, SourceReference
+from .export_approval import ExportApproval
+from .exporting import (
+    DEFAULT_MAX_EXPORT_BYTES,
+    ExportError,
+    ExportPolicy,
+    StandaloneExporter,
+)
 from .json_contract import JsonContractError, decode_json_object
 from .learning_service import InMemoryAttemptStore, LearningService
 from .pack_repository import PackRepository
+from .publishable_home import PublishableHome
 from .promotion import PromotionService
 from .promotion_models import PromotionError, StalePromotionError
 from .shell import make_server
@@ -100,6 +108,39 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         action="append",
         default=[],
+    )
+
+    export = subcommands.add_parser(
+        "export", help="create one sanitized standalone Learning Pack"
+    )
+    export.add_argument("--home", type=Path, required=True)
+    export.add_argument(
+        "--bundle-sha256",
+        required=True,
+        help="digest of a canonical stored Learning Pack Bundle",
+    )
+    export.add_argument(
+        "--canary-file",
+        type=Path,
+        action="append",
+        required=True,
+        help="exact private canary bytes that must be absent",
+    )
+    export.add_argument(
+        "--max-bytes",
+        type=int,
+        default=DEFAULT_MAX_EXPORT_BYTES,
+    )
+
+    approve_export = subcommands.add_parser(
+        "export-approve",
+        help="approve one exact canonical bundle for standalone export",
+    )
+    approve_export.add_argument("--home", type=Path, required=True)
+    approve_export.add_argument(
+        "--bundle-sha256",
+        required=True,
+        help="digest of the canonical bundle reviewed for export",
     )
     return parser
 
@@ -301,6 +342,64 @@ def main(argv: Sequence[str] | None = None) -> int:
                 }
             )
             return 0
+
+        if arguments.command == "export-approve":
+            with PublishableHome.open(arguments.home) as home:
+                with home.bundles() as bundles:
+                    bundle = bundles.snapshot(arguments.bundle_sha256)
+                    if bundle is None:
+                        raise StorageError(
+                            "Learning Pack Bundle snapshot was not found"
+                        )
+                snapshot = home.accepted_snapshot(bundle.pack_id)
+                bundle.require_snapshot(snapshot)
+                approval = ExportApproval.build(bundle, snapshot)
+                with home.approvals(create=True) as approvals:
+                    existing = approvals.get(bundle.bundle_sha256)
+                    approvals.save(approval)
+                _emit(
+                    {
+                        "status": (
+                            "already-approved"
+                            if existing is not None
+                            else "approved"
+                        ),
+                        "approval_id": approval.approval_id,
+                        "approval_sha256": approval.approval_sha256,
+                        "bundle_sha256": approval.bundle_sha256,
+                        "accepted_snapshot_sha256": (
+                            approval.accepted_snapshot_sha256
+                        ),
+                        "pack_id": approval.pack_id,
+                        "pack_version": approval.pack_version,
+                    }
+                )
+            return 0
+
+        if arguments.command == "export":
+            with PublishableHome.open(arguments.home) as home:
+                with home.bundles() as bundles:
+                    bundle = bundles.snapshot(arguments.bundle_sha256)
+                if bundle is None:
+                    raise StorageError(
+                        "Learning Pack Bundle snapshot was not found"
+                    )
+                with home.approvals() as approvals:
+                    approval = approvals.require(bundle)
+                canaries = tuple(
+                    _read_capture_input(path) for path in arguments.canary_file
+                )
+                with home.exports() as exports:
+                    receipt = StandaloneExporter(exports).export(
+                        bundle,
+                        ExportPolicy(
+                            canaries,
+                            max_export_bytes=arguments.max_bytes,
+                        ),
+                        approval=approval,
+                    )
+            _emit(receipt.to_dict())
+            return 0
     except (
         OSError,
         JsonContractError,
@@ -308,6 +407,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         StorageError,
         PromotionError,
         StalePromotionError,
+        ExportError,
         ValueError,
     ) as exc:
         print(f"error: {exc}", file=sys.stderr)
