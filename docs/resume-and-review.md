@@ -77,11 +77,12 @@ so it cannot distinguish deliberate deletion of the newest event or newest
 suffix by the local learning-home owner from a history that always ended
 there. Back up the private event directory if that local-owner threat matters.
 
-Every append uses an exclusive learning-home lock and an atomic create. The
-store then reads the exact bytes back before reporting success. On a filesystem
-that cannot confirm directory `fsync`, this proves the event is visible and an
-exact command retry can recover it; it does not claim the event will survive a
-sudden host power loss.
+Every append runs while the process holds an exclusive advisory lock on the
+already-bound event-directory inode, followed by an atomic create. The lock is
+not a removable lock file. The store then reads the exact bytes back before
+reporting success. On a filesystem that cannot confirm directory `fsync`, this
+proves the event is visible and an exact command retry can recover it; it does
+not claim the event will survive a sudden host power loss.
 
 ## Reset means two different things
 
