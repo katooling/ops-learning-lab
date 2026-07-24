@@ -6,6 +6,7 @@ cd "$repo_root"
 
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 python3 -m compileall -q src tests scripts
+python3 scripts/check_markdown_links.py
 python3 scripts/audit_publication.py
 
 install_root="${TMPDIR:-/tmp}/ops-learning-lab-verify-venv"
