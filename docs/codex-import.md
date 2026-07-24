@@ -220,7 +220,7 @@ Run:
 
 ```bash
 PYTHONPATH=src python3 -m unittest tests/test_codex_import.py -v
-./scripts/verify
+./scripts/verify-fast
 ```
 
 The focused tests prove exact pasted import, real CLI import of bounded task

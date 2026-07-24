@@ -134,8 +134,7 @@ valid state.
 Run:
 
 ```bash
-./scripts/verify
-./scripts/verify-browser
+./scripts/verify-fast
 ```
 
 The focused tests prove exact mid-attempt process restart, command
@@ -144,3 +143,11 @@ corruption failure without repair writes, premature review rejection,
 successful retention, unsuccessful-review retry, read-only due-page GETs, and
 the real 320-pixel keyboard journey through reload, read-only reset history,
 due review, and Retained mastery.
+
+Before release, run the full browser and history gate:
+
+```bash
+npm --prefix tests/browser ci
+(cd tests/browser && npx playwright install chromium)
+./scripts/verify
+```

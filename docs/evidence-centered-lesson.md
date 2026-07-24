@@ -113,15 +113,15 @@ authority. See [Resume learning and prove retained mastery](resume-and-review.md
 Run the product verifier:
 
 ```bash
-./scripts/verify
+./scripts/verify-fast
 ```
 
-Run the optional real-browser proof:
+Run the real-browser proof as part of the release gate:
 
 ```bash
 npm --prefix tests/browser ci
 (cd tests/browser && npx playwright install chromium)
-./scripts/verify-browser
+./scripts/verify
 ```
 
 The browser proof uses the real local HTTP shell at a 320-pixel viewport and

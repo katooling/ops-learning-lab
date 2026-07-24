@@ -4,18 +4,27 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_root"
 
-PYTHONPATH=src python3 -m unittest discover -s tests -v
-python3 -m compileall -q src tests scripts
-python3 scripts/check_markdown_links.py
+browser_root="$repo_root/tests/browser"
+if [ ! -d "$browser_root/node_modules/@playwright/test" ]; then
+  echo "release verification needs the test-only browser dependencies." >&2
+  echo "Run: npm --prefix tests/browser ci" >&2
+  echo "Then: (cd tests/browser && npx playwright install chromium)" >&2
+  exit 1
+fi
+browser_executable=$(
+  cd "$browser_root"
+  node -e \
+    "const { chromium } = require('@playwright/test'); process.stdout.write(chromium.executablePath())"
+)
+if [ ! -x "$browser_executable" ]; then
+  echo "release verification needs the test-only Chromium binary." >&2
+  echo "Run: (cd tests/browser && npx playwright install chromium)" >&2
+  exit 1
+fi
+
+./scripts/verify-fast
+python3 scripts/audit_history.py
+./scripts/verify-browser
+
+# Browser tooling must not have made the publishable tree unsafe.
 python3 scripts/audit_publication.py
-
-install_root=$(mktemp -d "${TMPDIR:-/tmp}/ops-learning-lab-verify.XXXXXX")
-cleanup() {
-  rm -rf "$install_root"
-}
-trap cleanup EXIT
-trap 'exit 1' HUP INT TERM
-
-python3 -m venv "$install_root"
-"$install_root/bin/python" -m pip install --disable-pip-version-check --no-deps -e .
-"$install_root/bin/opslearn" --help >/dev/null

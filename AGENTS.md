@@ -8,9 +8,10 @@ conversations, private attachments, screenshots, personal identifiers,
 credentials, local learning homes, generated exports, caches, or logs.
 
 Define the narrowest externally visible behavior that proves a change before
-editing code. Run `./scripts/verify` before committing. A passing unit test is
-not enough when the change crosses capture, persistence, browser, or export
-boundaries; add proof at the highest practical seam.
+editing code. Run `./scripts/verify-fast` before committing. A passing unit
+test is not enough when the change crosses capture, persistence, browser, or
+export boundaries; add proof at the highest practical seam. A release
+candidate must pass the complete `./scripts/verify` gate.
 
 The application is a local observer and simulator. Do not add external writes,
 message sending, production access, or silent promotion of private intake.

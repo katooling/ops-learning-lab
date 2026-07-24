@@ -23,7 +23,7 @@ SECRET_PATTERNS = (
         rb"\s*[:=]\s*['\"]?[A-Za-z0-9_./+=-]{12,}"
     ),
 )
-ABSOLUTE_HOME_PATTERN = re.compile(rb"/(?:Users|home)/[^/\\s]+/")
+ABSOLUTE_HOME_PATTERN = re.compile(rb"/(?:Users|home)/[^/\s]+/")
 MAX_PUBLIC_FILE_BYTES = 2_000_000
 
 
