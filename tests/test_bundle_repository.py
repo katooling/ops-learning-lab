@@ -75,7 +75,7 @@ class BundleRepositoryTests(unittest.TestCase):
             path = repository.root / f"{bundle.bundle_sha256}.json"
 
             path.symlink_to(home.root / ".ops-learning-lab-home")
-            with self.assertRaisesRegex(StorageError, "symbolic link"):
+            with self.assertRaisesRegex(StorageError, "cannot read"):
                 repository.snapshot(bundle.bundle_sha256)
             path.unlink()
 
@@ -117,7 +117,7 @@ class BundleRepositoryTests(unittest.TestCase):
             moved = snapshot_root.with_name("learning-packs-moved")
             snapshot_root.rename(moved)
             snapshot_root.symlink_to(moved, target_is_directory=True)
-            with self.assertRaisesRegex(StorageError, "unsafe"):
+            with self.assertRaisesRegex(StorageError, "changed"):
                 repository.snapshot(bundle.bundle_sha256)
 
 
