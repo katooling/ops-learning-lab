@@ -14,6 +14,7 @@ import tempfile
 from typing import Iterable
 
 from .domain import ID_PATTERN, IntakeManifest, SourceReference
+from .json_contract import JsonContractError, decode_json_object
 
 
 MARKER_FILE = ".ops-learning-lab-home"
@@ -291,10 +292,10 @@ class LearningHome:
                 intake,
                 "intake manifest",
             )
-            value = json.loads(manifest_bytes.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            value = decode_json_object(manifest_bytes, "intake manifest")
+            return IntakeManifest.from_dict(value)
+        except (JsonContractError, TypeError, ValueError) as exc:
             raise StorageError(f"cannot read manifest for {intake_id}") from exc
-        return IntakeManifest.from_dict(value)
 
     def audit_canary(self, canary: bytes) -> list[str]:
         if not canary:

@@ -10,9 +10,15 @@ import sys
 import tempfile
 from threading import Thread
 import unittest
+from unittest import mock
 
 from ops_learning_lab.compiler import compile_update, propose_pack_match
-from ops_learning_lab.domain import PackProfile, SourceReference
+from ops_learning_lab.domain import (
+    PackProfile,
+    SchemaError,
+    SourceReference,
+    StagedPackUpdate,
+)
 from ops_learning_lab.shell import make_server
 from ops_learning_lab.staging import PackUpdateRepository
 from ops_learning_lab.storage import LearningHome, StorageError
@@ -44,6 +50,9 @@ class PackMatchTests(unittest.TestCase):
         self.assertEqual(result.kind, "strong")
         self.assertEqual(result.proposed_pack_id, "alpha-pack")
         self.assertEqual(result.candidates[0].matched_terms, ("alpha", "trace"))
+        self.assertEqual(len(result.candidates[0].match_profile_sha256), 64)
+        self.assertIsNone(result.candidates[0].expected_base_version)
+        self.assertIsNone(result.candidates[0].expected_base_sha256)
         self.assertIn("alpha, trace", result.reasons[0])
 
     def test_several_plausible_packs_require_learner_choice(self) -> None:
@@ -152,13 +161,27 @@ class CaptureModeJourneyTests(unittest.TestCase):
                 )
                 self.assertIn("Staged Pack Update", body)
                 self.assertIn("Proposed destination: Synthetic Codex ETL", body)
-                self.assertIn("Nothing has changed", body)
+                self.assertIn("Nothing has changed in any Learning Pack", body)
                 self.assertIn("&lt;script&gt;", body)
                 self.assertNotIn("<script>alert", body)
                 self.assertNotIn(raw_canary, body)
                 self.assertNotIn(str(home_path), body)
                 self.assertNotIn("raw.bin", body)
                 self.assertNotIn("/private/", body)
+
+                connection.request("HEAD", result["review_path"])
+                head_response = connection.getresponse()
+                self.assertEqual(head_response.status, 200)
+                self.assertEqual(head_response.read(), b"")
+                self.assertEqual(
+                    int(head_response.getheader("Content-Length", "0")),
+                    len(body.encode("utf-8")),
+                )
+
+                connection.request("HEAD", "/private/inbox")
+                private_head = connection.getresponse()
+                self.assertEqual(private_head.status, 404)
+                private_head.read()
 
                 connection.request("GET", "/private/inbox")
                 private_response = connection.getresponse()
@@ -300,7 +323,7 @@ class CaptureModeJourneyTests(unittest.TestCase):
             corrupt = repository.root / f"update-{'a' * 20}.json"
             corrupt.write_text('{"schema_version":1}', encoding="utf-8")
 
-            with self.assertRaisesRegex(Exception, "fields do not match"):
+            with self.assertRaisesRegex(SchemaError, "does not match the schema"):
                 list(repository.list())
 
     def test_tampered_staged_update_fails_digest_validation(self) -> None:
@@ -320,8 +343,112 @@ class CaptureModeJourneyTests(unittest.TestCase):
             value["proposed_claims"][0]["text"] = "Tampered claim"
             path.write_text(json.dumps(value), encoding="utf-8")
 
-            with self.assertRaisesRegex(Exception, "does not match staged content"):
+            with self.assertRaisesRegex(SchemaError, "does not match the schema"):
                 repository.get(update.update_id)
+
+    def test_staged_update_rejects_duplicate_json_keys(self) -> None:
+        repository, update, temporary = self._one_staged_update()
+        with temporary:
+            path = repository.root / f"{update.update_id}.json"
+            encoded = path.read_text(encoding="utf-8")
+            encoded = encoded.replace(
+                '"schema_version": 1',
+                '"schema_version": 1, "schema_version": 1',
+                1,
+            )
+            path.write_text(encoded, encoding="utf-8")
+
+            with self.assertRaisesRegex(SchemaError, "does not match the schema"):
+                repository.get(update.update_id)
+
+            server = make_server(repository, "127.0.0.1", 0)
+            thread = Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                connection = http.client.HTTPConnection(
+                    "127.0.0.1",
+                    server.server_address[1],
+                )
+                connection.request("GET", f"/updates/{update.update_id}")
+                response = connection.getresponse()
+                body = response.read().decode("utf-8")
+                self.assertEqual(response.status, 500)
+                self.assertIn("Staged update is unavailable", body)
+                self.assertNotIn("duplicate", body.lower())
+                self.assertNotIn(str(repository.root), body)
+                connection.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+    def test_staged_update_rejects_nested_non_finite_number(self) -> None:
+        repository, update, temporary = self._one_staged_update()
+        with temporary:
+            path = repository.root / f"{update.update_id}.json"
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["match"]["candidates"][0]["matched_terms"][0] = float("nan")
+            path.write_text(json.dumps(value), encoding="utf-8")
+
+            with self.assertRaisesRegex(SchemaError, "does not match the schema"):
+                repository.get(update.update_id)
+
+    def test_staged_update_converts_nested_type_error_to_schema_error(self) -> None:
+        repository, update, temporary = self._one_staged_update()
+        with temporary:
+            path = repository.root / f"{update.update_id}.json"
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["proposal_sha256"] = None
+            path.write_text(json.dumps(value), encoding="utf-8")
+
+            with self.assertRaisesRegex(SchemaError, "does not match the schema"):
+                repository.get(update.update_id)
+
+    def test_failed_staged_replace_leaves_no_destination_or_temporary_file(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = LearningHome.initialize(Path(directory) / "learning-home")
+            repository = PackUpdateRepository.open(home.root)
+            source = SourceReference(
+                source_type="pasted-text",
+                source_id="interrupted-stage",
+                observed_at="2026-07-24T12:00:00Z",
+            )
+            content = b"Codex ETL usage.\nClaim: Atomic staged write.\n"
+            manifest = home.capture(content, source)
+            update = compile_update(content, manifest)
+
+            with mock.patch(
+                "pathlib.Path.replace",
+                side_effect=OSError("synthetic staged replace failure"),
+            ):
+                with self.assertRaisesRegex(
+                    OSError,
+                    "synthetic staged replace failure",
+                ):
+                    repository.stage(update)
+
+            self.assertEqual(list(repository.root.iterdir()), [])
+
+    @staticmethod
+    def _one_staged_update() -> tuple[
+        PackUpdateRepository,
+        StagedPackUpdate,
+        tempfile.TemporaryDirectory[str],
+    ]:
+        temporary = tempfile.TemporaryDirectory()
+        home = LearningHome.initialize(Path(temporary.name) / "learning-home")
+        repository = PackUpdateRepository.open(home.root)
+        source = SourceReference(
+            source_type="pasted-text",
+            source_id="strict-json-test",
+            observed_at="2026-07-24T12:00:00Z",
+        )
+        content = b"Codex ETL usage.\nClaim: Strict synthetic JSON.\n"
+        manifest = home.capture(content, source)
+        update = repository.stage(compile_update(content, manifest))
+        return repository, update, temporary
 
 
 class CaptureInputTests(unittest.TestCase):

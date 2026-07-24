@@ -138,7 +138,7 @@ class IntakeManifest:
 
 @dataclass(frozen=True, slots=True)
 class PackProfile:
-    """Small accepted-pack descriptor used only for deterministic matching."""
+    """Small destination profile used only for deterministic matching."""
 
     pack_id: str
     title: str
@@ -160,7 +160,7 @@ class PackProfile:
             raise SchemaError("match_terms must be unique lowercase terms")
 
     @property
-    def content_sha256(self) -> str:
+    def profile_sha256(self) -> str:
         identity = "\0".join((self.pack_id, self.title, *self.match_terms))
         return sha256(identity.encode("utf-8")).hexdigest()
 
@@ -170,8 +170,9 @@ class MatchCandidate:
     pack_id: str
     title: str
     matched_terms: tuple[str, ...]
-    expected_base_version: int
-    expected_base_sha256: str
+    match_profile_sha256: str
+    expected_base_version: int | None
+    expected_base_sha256: str | None
 
     def __post_init__(self) -> None:
         if not isinstance(self.pack_id, str) or not PACK_ID_PATTERN.fullmatch(
@@ -183,16 +184,33 @@ class MatchCandidate:
             raise SchemaError("candidate matched_terms must not be empty")
         if tuple(sorted(set(self.matched_terms))) != self.matched_terms:
             raise SchemaError("candidate matched_terms must be sorted and unique")
-        if self.expected_base_version != 1:
-            raise SchemaError("expected_base_version must be 1")
-        if not SHA256_PATTERN.fullmatch(self.expected_base_sha256):
-            raise SchemaError("expected_base_sha256 must be a SHA-256 digest")
+        if (
+            not isinstance(self.match_profile_sha256, str)
+            or not SHA256_PATTERN.fullmatch(self.match_profile_sha256)
+        ):
+            raise SchemaError("match_profile_sha256 must be a SHA-256 digest")
+        base_is_absent = (
+            self.expected_base_version is None
+            and self.expected_base_sha256 is None
+        )
+        base_is_present = (
+            isinstance(self.expected_base_version, int)
+            and not isinstance(self.expected_base_version, bool)
+            and self.expected_base_version > 0
+            and isinstance(self.expected_base_sha256, str)
+            and SHA256_PATTERN.fullmatch(self.expected_base_sha256) is not None
+        )
+        if not (base_is_absent or base_is_present):
+            raise SchemaError(
+                "expected base version and digest must both be absent or valid"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "pack_id": self.pack_id,
             "title": self.title,
             "matched_terms": list(self.matched_terms),
+            "match_profile_sha256": self.match_profile_sha256,
             "expected_base_version": self.expected_base_version,
             "expected_base_sha256": self.expected_base_sha256,
         }
@@ -203,6 +221,7 @@ class MatchCandidate:
             "pack_id",
             "title",
             "matched_terms",
+            "match_profile_sha256",
             "expected_base_version",
             "expected_base_sha256",
         }:
@@ -213,6 +232,7 @@ class MatchCandidate:
             pack_id=value["pack_id"],
             title=value["title"],
             matched_terms=tuple(value["matched_terms"]),
+            match_profile_sha256=value["match_profile_sha256"],
             expected_base_version=value["expected_base_version"],
             expected_base_sha256=value["expected_base_sha256"],
         )

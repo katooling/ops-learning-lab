@@ -63,7 +63,7 @@ def _index(repository: PackUpdateRepository) -> bytes:
     return _layout(
         "Staged updates",
         "<h1>Staged Pack Updates</h1>"
-        "<p>Review proposals here. Capture Mode never changes accepted packs "
+        "<p>Review proposals here. Capture Mode never changes Learning Packs "
         "or starts a lesson.</p>"
         f"<ul>{items}</ul>",
     )
@@ -115,7 +115,7 @@ def _detail(update: StagedPackUpdate) -> bytes:
         f"<section><h2>Proposed claims</h2>{claims}</section>"
         f"<section><h2>Privacy redactions</h2><ul>{redactions}</ul></section>"
         "<section><h2>Capture result</h2>"
-        "<p>Nothing has changed in the accepted pack. No lesson has started.</p>"
+        "<p>Nothing has changed in any Learning Pack. No lesson has started.</p>"
         "<dl>"
         f"<dt>Source type</dt><dd>{escape(update.source.source_type)}</dd>"
         f"<dt>Observed at</dt><dd>{escape(update.source.observed_at)}</dd>"
@@ -129,55 +129,55 @@ def make_server(
     host: str,
     port: int,
 ) -> ThreadingHTTPServer:
-    if host not in {"127.0.0.1", "::1", "localhost"}:
+    if host not in {"127.0.0.1", "localhost"}:
         raise ValueError("Product Shell may bind only to the local loopback interface")
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            status, body, content_type = self._route()
+            self._send(status, body, content_type)
+
+        def do_HEAD(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            status, body, content_type = self._route()
+            self._send(status, body, content_type, head_only=True)
+
+        def _route(self) -> tuple[HTTPStatus, bytes, str]:
             if not self._trusted_host():
-                self._send(HTTPStatus.BAD_REQUEST, b"invalid Host header\n", "text/plain; charset=utf-8")
-                return
+                return (
+                    HTTPStatus.BAD_REQUEST,
+                    b"invalid Host header\n",
+                    "text/plain; charset=utf-8",
+                )
             path = unquote(urlsplit(self.path).path)
             try:
                 if path == "/":
-                    self._send(HTTPStatus.OK, _index(repository))
-                    return
+                    return HTTPStatus.OK, _index(repository), "text/html; charset=utf-8"
                 if path == "/health":
-                    self._send(HTTPStatus.OK, b"ok\n", "text/plain; charset=utf-8")
-                    return
+                    return HTTPStatus.OK, b"ok\n", "text/plain; charset=utf-8"
                 prefix = "/updates/"
                 if path.startswith(prefix) and "/" not in path[len(prefix) :]:
-                    self._send(
+                    return (
                         HTTPStatus.OK,
                         _detail(repository.get(path[len(prefix) :])),
+                        "text/html; charset=utf-8",
                     )
-                    return
             except StorageError:
-                self._send(
+                return (
                     HTTPStatus.NOT_FOUND,
                     _layout("Not found", "<h1>Not found</h1>"),
+                    "text/html; charset=utf-8",
                 )
-                return
             except SchemaError:
-                self._send(
+                return (
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                     _layout("Unavailable", "<h1>Staged update is unavailable</h1>"),
+                    "text/html; charset=utf-8",
                 )
-                return
-            self._send(
+            return (
                 HTTPStatus.NOT_FOUND,
                 _layout("Not found", "<h1>Not found</h1>"),
+                "text/html; charset=utf-8",
             )
-
-        def do_HEAD(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
-            if not self._trusted_host():
-                self._send(
-                    HTTPStatus.BAD_REQUEST,
-                    b"",
-                    "text/plain; charset=utf-8",
-                )
-                return
-            self._send(HTTPStatus.OK, b"")
 
         def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
             self._method_not_allowed()
@@ -196,13 +196,15 @@ def make_server(
         def _trusted_host(self) -> bool:
             value = self.headers.get("Host", "")
             hostname = value.rsplit(":", 1)[0].strip("[]").lower()
-            return hostname in {"127.0.0.1", "::1", "localhost"}
+            return hostname in {"127.0.0.1", "localhost"}
 
         def _send(
             self,
             status: HTTPStatus,
             body: bytes,
             content_type: str = "text/html; charset=utf-8",
+            *,
+            head_only: bool = False,
         ) -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
@@ -216,7 +218,8 @@ def make_server(
             self.send_header("Referrer-Policy", "no-referrer")
             self.send_header("X-Frame-Options", "DENY")
             self.end_headers()
-            self.wfile.write(body)
+            if not head_only:
+                self.wfile.write(body)
 
         def log_message(self, format: str, *args: object) -> None:
             return

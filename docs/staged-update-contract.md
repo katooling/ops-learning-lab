@@ -35,13 +35,25 @@ identifiers and any later replace, supersede, or contradict relationship.
 
 Every match candidate carries:
 
-- accepted pack identifier and title;
+- proposed pack identifier and title from the destination profile;
 - exact shared match terms;
-- expected base version;
-- expected base content digest.
+- a digest of the matching profile;
+- an optional expected base version and content digest.
 
-Promotion must compare the expected base identity with the current accepted
-pack before committing a decision. An ambiguous match has no selected target.
+The matching profile identifies only the terms used to propose a destination.
+It is not canonical Learning Pack state. Version one does not yet persist an
+accepted pack artifact, so both expected-base fields are `null`. Promotion must
+resolve or create the real target pack and bind its own decision to that
+canonical state. Once a persisted pack exists, both expected-base fields must
+be present together. An ambiguous match has no selected target.
+
+## Strict JSON
+
+Persisted manifests and staged updates use one strict JSON decoder. It rejects
+duplicate object keys, non-finite numbers such as `NaN` or `Infinity`, invalid
+UTF-8, and non-object roots before domain validation. Malformed persisted
+updates produce one generic schema error; raw parser exceptions are not exposed
+through the Product Shell.
 
 ## Privacy boundary
 

@@ -9,7 +9,8 @@ from pathlib import Path
 import stat
 from typing import Iterable
 
-from .domain import StagedPackUpdate, UPDATE_ID_PATTERN
+from .domain import SchemaError, StagedPackUpdate, UPDATE_ID_PATTERN
+from .json_contract import JsonContractError, decode_json_object
 from .storage import (
     STAGED_UPDATES,
     StorageError,
@@ -72,10 +73,10 @@ class PackUpdateRepository:
             "staged update",
         )
         try:
-            value = json.loads(data.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise StorageError(f"cannot read staged update {update_id}") from exc
-        return StagedPackUpdate.from_dict(value)
+            value = decode_json_object(data, "staged update")
+            return StagedPackUpdate.from_dict(value)
+        except (JsonContractError, SchemaError, TypeError, ValueError) as exc:
+            raise SchemaError("staged update does not match the schema") from exc
 
     def list(self) -> Iterable[StagedPackUpdate]:
         _require_safe_directory(self.root, self.root.parent.parent, "staged updates")

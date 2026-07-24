@@ -68,8 +68,9 @@ def propose_pack_match(
                     pack_id=profile.pack_id,
                     title=profile.title,
                     matched_terms=matched,
-                    expected_base_version=1,
-                    expected_base_sha256=profile.content_sha256,
+                    match_profile_sha256=profile.profile_sha256,
+                    expected_base_version=None,
+                    expected_base_sha256=None,
                 )
             )
 
@@ -80,7 +81,7 @@ def propose_pack_match(
             candidates=(candidate,),
             proposed_pack_id=candidate.pack_id,
             reasons=(
-                f"Matched {len(candidate.matched_terms)} accepted pack terms: "
+                f"Matched {len(candidate.matched_terms)} destination profile terms: "
                 + ", ".join(candidate.matched_terms),
             ),
         )
@@ -90,8 +91,8 @@ def propose_pack_match(
             candidates=tuple(candidates),
             proposed_pack_id=None,
             reasons=(
-                "Several accepted packs share at least two terms with this intake.",
-                "Learner choice is required; accepted pack content is unchanged.",
+                "Several destination profiles share at least two terms with this intake.",
+                "Learner choice is required; Learning Pack content is unchanged.",
             ),
         )
     return PackMatch(
@@ -99,8 +100,8 @@ def propose_pack_match(
         candidates=(),
         proposed_pack_id=None,
         reasons=(
-            "No accepted pack shares enough terms with this intake.",
-            "A new Learning Pack is proposed; no existing pack was selected.",
+            "No destination profile shares enough terms with this intake.",
+            "A new Learning Pack is proposed; no profile was selected.",
         ),
     )
 
