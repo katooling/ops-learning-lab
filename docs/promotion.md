@@ -104,10 +104,11 @@ one atomically replaced document. Safe claim provenance includes only:
 It excludes private source identifiers, raw paths, raw bytes, intake IDs, and
 source content hashes.
 
-Lesson and export code should use `PackRepository.snapshot(pack_id)`. That
-read-only snapshot exposes validated accepted content and its canonical version
-and digest, without Promotion history or a capability to read staged or private
-content.
+Lesson assembly and export approval use `PackRepository.snapshot(pack_id)`.
+That read-only snapshot exposes validated accepted content and its canonical
+version and digest, without Promotion history or a capability to read staged or
+private content. An export later uses its immutable bundle-and-snapshot
+approval, not the mutable current Pack pointer.
 
 ## Command-line automation
 

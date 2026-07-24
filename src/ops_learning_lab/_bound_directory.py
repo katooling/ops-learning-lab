@@ -24,6 +24,14 @@ class _BoundWriteOutcome:
     directory_synced: bool
 
 
+@dataclass(frozen=True, slots=True)
+class _BoundCreateOutcome:
+    """Result of an atomic create-if-absent operation."""
+
+    created: bool
+    directory_synced: bool
+
+
 class _BoundDirectory:
     """A narrow capability bound to one already-approved directory inode."""
 
@@ -99,6 +107,68 @@ class _BoundDirectory:
         self._require_path_binding()
         return content
 
+    def open_child_directory(
+        self,
+        name: str,
+        label: str,
+        *,
+        create: bool = False,
+        mode: int = 0o700,
+    ) -> _BoundDirectory:
+        """Open one child directory relative to this retained descriptor.
+
+        The caller never resolves the child through an independently trusted
+        pathname. Both the parent and child remain bound to their original
+        inodes, so replacing any visible ancestor makes later operations fail.
+        """
+
+        self._require_open()
+        self._require_leaf_name(name)
+        self._validate_bound_descriptor()
+        self._require_path_binding()
+        if create:
+            try:
+                os.mkdir(name, mode=mode, dir_fd=self._descriptor)
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                raise StorageError(f"cannot create {label}") from exc
+
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            descriptor = os.open(name, flags, dir_fd=self._descriptor)
+        except OSError as exc:
+            raise StorageError(f"{label} is missing or unsafe") from exc
+        try:
+            metadata = os.fstat(descriptor)
+            self._validate_metadata(metadata, label)
+            visible = os.stat(
+                name,
+                dir_fd=self._descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISDIR(visible.st_mode)
+                or visible.st_dev != metadata.st_dev
+                or visible.st_ino != metadata.st_ino
+            ):
+                raise StorageError(f"{label} changed while it was opened")
+            self._require_path_binding()
+            return _BoundDirectory(
+                self.path / name,
+                descriptor,
+                metadata.st_dev,
+                metadata.st_ino,
+                label,
+            )
+        except BaseException:
+            os.close(descriptor)
+            raise
+
     def _read_regular_bound(self, name: str, label: str) -> bytes | None:
         flags = (
             os.O_RDONLY
@@ -170,6 +240,52 @@ class _BoundDirectory:
                 os.close(descriptor)
             if not committed:
                 self._unlink_if_present(temporary_name)
+
+    def atomic_create(
+        self,
+        name: str,
+        content: bytes,
+        mode: int,
+    ) -> _BoundCreateOutcome:
+        """Create one immutable leaf without ever replacing an existing leaf."""
+
+        self._require_open()
+        self._require_leaf_name(name)
+        if not isinstance(content, bytes):
+            raise StorageError("atomic content must be bytes")
+        if not isinstance(mode, int) or isinstance(mode, bool):
+            raise StorageError("atomic file mode must be an integer")
+        self._validate_bound_descriptor()
+        self._require_path_binding()
+
+        temporary_name, descriptor = self._create_temporary(name)
+        try:
+            os.fchmod(descriptor, mode)
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._require_path_binding()
+            try:
+                os.link(
+                    temporary_name,
+                    name,
+                    src_dir_fd=self._descriptor,
+                    dst_dir_fd=self._descriptor,
+                    follow_symlinks=False,
+                )
+            except FileExistsError:
+                return _BoundCreateOutcome(False, True)
+            directory_synced = self._sync_directory()
+            if not self._path_matches_binding():
+                self._remove_committed_if_equal(name, content)
+                raise StorageError(f"{self._label} changed during atomic create")
+            return _BoundCreateOutcome(True, directory_synced)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            self._unlink_if_present(temporary_name)
 
     def close(self) -> None:
         if self._descriptor >= 0:

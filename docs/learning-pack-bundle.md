@@ -20,9 +20,15 @@ Once assembled, a bundle is saved by digest under:
 snapshots/learning-packs/<bundle-sha256>.json
 ```
 
-Lesson preparation is the only write path. Runtime consumers load a canonical
-bundle by digest and bind it to the current accepted Pack snapshot. They do not
-accept an arbitrary external bundle file.
+Lesson preparation is the only bundle write path. Teaching binds a canonical
+bundle to the current accepted Pack snapshot. Standalone export adds a separate
+explicit approval that binds the complete bundle digest to the exact accepted
+snapshot revision. Consumers do not accept an arbitrary external bundle file.
+
+Canonical storage is not approval. Export approval creates a separate immutable
+record under `snapshots/export-approvals/`. A later Promotion may make a newer
+Pack current, but it cannot change the exact bundle and accepted revision named
+by an existing approval.
 
 ## Identity
 
@@ -66,4 +72,5 @@ Loading or constructing a bundle fails when:
 - text contains a structural private-storage marker.
 
 The bundle remains sanitized input, not permission to serialize every field.
-Each consumer still uses an explicit allowlist.
+Each consumer still uses an explicit allowlist. Standalone export also requires
+an exact `ExportApproval`; a schema-valid canonical bundle without one fails.

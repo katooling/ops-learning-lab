@@ -24,6 +24,14 @@ class BoundDirectoryTests(unittest.TestCase):
                     bound.read_regular("artifact.txt", "artifact"),
                     b"safe",
                 )
+                created = bound.atomic_create("immutable.txt", b"first", 0o600)
+                existing = bound.atomic_create("immutable.txt", b"second", 0o600)
+                self.assertTrue(created.created)
+                self.assertFalse(existing.created)
+                self.assertEqual(
+                    bound.read_regular("immutable.txt", "immutable artifact"),
+                    b"first",
+                )
             finally:
                 bound.close()
 
@@ -88,6 +96,36 @@ class BoundDirectoryTests(unittest.TestCase):
                         bound.read_regular("pipe", "artifact")
             finally:
                 bound.close()
+
+    def test_child_directory_keeps_the_parent_ancestor_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            approved = root / "approved"
+            child_path = approved / "child"
+            child_path.mkdir(parents=True)
+            parent = _BoundDirectory.open(approved, "approved directory")
+            child = parent.open_child_directory("child", "child directory")
+            displaced = root / "approved-displaced"
+            try:
+                approved.rename(displaced)
+                approved.mkdir()
+
+                with self.assertRaisesRegex(
+                    StorageError,
+                    "changed after it was opened",
+                ):
+                    parent.open_child_directory("child", "child directory")
+                with self.assertRaisesRegex(
+                    StorageError,
+                    "changed after it was opened",
+                ):
+                    child.atomic_replace("artifact.txt", b"safe", 0o600)
+            finally:
+                child.close()
+                parent.close()
+
+            self.assertEqual(list(approved.iterdir()), [])
+            self.assertEqual(list((displaced / "child").iterdir()), [])
 
 
 if __name__ == "__main__":

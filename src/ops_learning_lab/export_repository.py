@@ -37,6 +37,14 @@ class ExportRepository:
     def open(cls, root: Path) -> ExportRepository:
         return cls(_BoundDirectory.open(root, "exports directory"))
 
+    @classmethod
+    def from_directory(cls, directory: _BoundDirectory) -> ExportRepository:
+        """Take ownership of an already home-anchored export directory."""
+
+        if not isinstance(directory, _BoundDirectory):
+            raise StorageError("export repository needs a bound directory")
+        return cls(directory)
+
     def commit(
         self,
         pack_id: str,

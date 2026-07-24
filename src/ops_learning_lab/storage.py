@@ -158,6 +158,13 @@ class LearningHome:
             if target.is_symlink():
                 raise StorageError(f"{directory} cannot be a symbolic link")
             target.mkdir(exist_ok=True)
+        for snapshot_directory in ("learning-packs", "export-approvals"):
+            target = candidate / "snapshots" / snapshot_directory
+            if target.is_symlink():
+                raise StorageError(
+                    f"{snapshot_directory} cannot be a symbolic link"
+                )
+            target.mkdir(exist_ok=True)
 
         marker = candidate / MARKER_FILE
         if not marker.exists():
