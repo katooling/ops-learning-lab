@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import tempfile
 from typing import Iterable
 
@@ -58,6 +59,30 @@ def _require_owned_private_directory(path: Path, home: Path, label: str) -> None
         raise StorageError(f"{label} is not owned by the current user")
     if stat.st_mode & 0o077:
         raise StorageError(f"{label} permissions must be 0700")
+
+
+def _read_confined_regular_file(path: Path, parent: Path, label: str) -> bytes:
+    if path.is_symlink():
+        raise StorageError(f"{label} cannot be a symbolic link")
+    try:
+        path.resolve(strict=True).relative_to(parent.resolve(strict=True))
+    except (OSError, ValueError) as exc:
+        raise StorageError(f"{label} is missing or escapes its intake") from exc
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise StorageError(f"cannot read {label}") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise StorageError(f"{label} is not a regular file")
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            return handle.read()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,7 +186,12 @@ class LearningHome:
                 not same_source
                 or existing.content_sha256 != content_digest
                 or existing.byte_count != len(content)
-                or raw_path.read_bytes() != content
+                or _read_confined_regular_file(
+                    raw_path,
+                    destination,
+                    "raw intake file",
+                )
+                != content
             ):
                 raise StorageError("intake identity collides with different content")
             return existing
@@ -204,8 +234,13 @@ class LearningHome:
             raise StorageError("intake manifest escapes the private inbox") from exc
         path = intake / "manifest.json"
         try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            manifest_bytes = _read_confined_regular_file(
+                path,
+                intake,
+                "intake manifest",
+            )
+            value = json.loads(manifest_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise StorageError(f"cannot read manifest for {intake_id}") from exc
         return IntakeManifest.from_dict(value)
 

@@ -187,6 +187,57 @@ class PhaseOneCliTests(unittest.TestCase):
             ):
                 home.read_manifest("../../outside")
 
+    def test_read_manifest_rejects_manifest_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = LearningHome.initialize(root / "learning-home")
+            source = SourceReference(
+                source_type="pasted-text",
+                source_id="manifest-symlink",
+                observed_at="2026-07-24T12:00:00Z",
+            )
+            manifest = home.capture(b"safe source\n", source)
+            manifest_path = (
+                home.root
+                / "private"
+                / "inbox"
+                / manifest.intake_id
+                / "manifest.json"
+            )
+            external = root / "external-manifest.json"
+            external.write_bytes(manifest_path.read_bytes())
+            manifest_path.unlink()
+            manifest_path.symlink_to(external)
+
+            with self.assertRaisesRegex(
+                StorageError, "intake manifest cannot be a symbolic link"
+            ):
+                home.read_manifest(manifest.intake_id)
+
+    def test_existing_capture_rejects_raw_file_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = LearningHome.initialize(root / "learning-home")
+            content = b"safe source\n"
+            source = SourceReference(
+                source_type="pasted-text",
+                source_id="raw-symlink",
+                observed_at="2026-07-24T12:00:00Z",
+            )
+            manifest = home.capture(content, source)
+            raw_path = (
+                home.root / "private" / "inbox" / manifest.intake_id / "raw.bin"
+            )
+            external = root / "external-raw.bin"
+            external.write_bytes(content)
+            raw_path.unlink()
+            raw_path.symlink_to(external)
+
+            with self.assertRaisesRegex(
+                StorageError, "raw intake file cannot be a symbolic link"
+            ):
+                home.capture(content, source)
+
     def test_failed_staged_capture_leaves_no_partial_intake(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             home_path = Path(directory) / "learning-home"
