@@ -5,12 +5,20 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
+import stat
 import sys
 from typing import Sequence
 
+from .compiler import compile_update, validate_capture_text
 from .domain import SchemaError, SourceReference
+from .shell import make_server
+from .staging import PackUpdateRepository
 from .storage import LearningHome, StorageError
+
+
+MAX_CAPTURE_BYTES = 1_048_576
 
 
 def _utc_now() -> str:
@@ -40,11 +48,46 @@ def _parser() -> argparse.ArgumentParser:
     )
     audit.add_argument("--home", type=Path, required=True)
     audit.add_argument("--canary-file", type=Path, required=True)
+
+    serve = subcommands.add_parser(
+        "serve", help="serve the local staged-update Product Shell"
+    )
+    serve.add_argument("--home", type=Path, required=True)
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8000)
     return parser
 
 
 def _emit(value: dict[str, object]) -> None:
     print(json.dumps(value, sort_keys=True, separators=(",", ":")))
+
+
+def _read_capture_input(path: Path) -> bytes:
+    if path.is_symlink():
+        raise StorageError("capture input cannot be a symbolic link")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise StorageError("cannot read capture input") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise StorageError("capture input must be a regular file")
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            content = handle.read(MAX_CAPTURE_BYTES + 1)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if len(content) > MAX_CAPTURE_BYTES:
+        raise StorageError(
+            f"capture input exceeds the {MAX_CAPTURE_BYTES}-byte safety limit"
+        )
+    return content
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -57,19 +100,32 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if arguments.command == "capture":
             home = LearningHome.open(arguments.home)
-            content = arguments.input.read_bytes()
+            content = _read_capture_input(arguments.input)
+            try:
+                capture_text = content.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise SchemaError("Capture Mode accepts UTF-8 text only") from exc
+            validate_capture_text(capture_text)
             source = SourceReference(
                 source_type=arguments.source_type,
                 source_id=arguments.source_id,
                 observed_at=arguments.observed_at or _utc_now(),
             )
             manifest = home.capture(content, source)
+            update = PackUpdateRepository.open(home.root).stage(
+                compile_update(content, manifest)
+            )
             _emit(
                 {
-                    "status": "captured",
+                    "status": "staged",
                     "intake_id": manifest.intake_id,
                     "content_sha256": manifest.content_sha256,
                     "byte_count": manifest.byte_count,
+                    "update_id": update.update_id,
+                    "match_kind": update.match.kind,
+                    "proposed_pack_id": update.match.proposed_pack_id,
+                    "review_path": f"/updates/{update.update_id}",
+                    "lesson_started": False,
                 }
             )
             return 0
@@ -84,7 +140,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 }
             )
             return 0 if not leaks else 2
-    except (OSError, SchemaError, StorageError) as exc:
+
+        if arguments.command == "serve":
+            home = LearningHome.open(arguments.home)
+            repository = PackUpdateRepository.open(home.root)
+            server = make_server(repository, arguments.host, arguments.port)
+            host, port = server.server_address[:2]
+            _emit({"status": "serving", "url": f"http://{host}:{port}/"})
+            sys.stdout.flush()
+            try:
+                server.serve_forever()
+            except KeyboardInterrupt:
+                pass
+            finally:
+                server.server_close()
+            return 0
+    except (OSError, SchemaError, StorageError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     raise AssertionError(f"unhandled command: {arguments.command}")
