@@ -228,6 +228,7 @@ class LearningHome:
         ]
         if source.retrieval_scope is not None:
             identity_parts.append(source.retrieval_scope.encode("utf-8"))
+            identity_parts.append(source.observed_at.encode("utf-8"))
         identity = b"\0".join(identity_parts)
         intake_id = f"intake-{sha256(identity).hexdigest()[:20]}"
         destination = inbox / intake_id
@@ -244,26 +245,30 @@ class LearningHome:
         raw_path = destination / manifest.raw_file
         manifest_path = destination / "manifest.json"
 
-        if destination.exists():
-            if not destination.is_dir():
-                raise StorageError("intake destination is not a directory")
-            existing = self.read_manifest(intake_id)
-            same_source = (
+        def matches_existing(existing: IntakeManifest) -> bool:
+            return (
                 existing.source.source_type == source.source_type
                 and existing.source.source_id == source.source_id
                 and existing.source.retrieval_scope == source.retrieval_scope
-            )
-            if (
-                not same_source
-                or existing.content_sha256 != content_digest
-                or existing.byte_count != len(content)
-                or _read_confined_regular_file(
+                and (
+                    source.retrieval_scope is None
+                    or existing.source.observed_at == source.observed_at
+                )
+                and existing.content_sha256 == content_digest
+                and existing.byte_count == len(content)
+                and _read_confined_regular_file(
                     raw_path,
                     destination,
                     "raw intake file",
                 )
-                != content
-            ):
+                == content
+            )
+
+        if destination.exists():
+            if not destination.is_dir():
+                raise StorageError("intake destination is not a directory")
+            existing = self.read_manifest(intake_id)
+            if not matches_existing(existing):
                 raise StorageError("intake identity collides with different content")
             return existing
 
@@ -292,19 +297,7 @@ class LearningHome:
                 # Another identical capture won the atomic directory rename.
                 # The collision is accepted only after the winner is verified.
                 existing = self.read_manifest(intake_id)
-                if (
-                    existing.source.source_type != source.source_type
-                    or existing.source.source_id != source.source_id
-                    or existing.source.retrieval_scope != source.retrieval_scope
-                    or existing.content_sha256 != content_digest
-                    or existing.byte_count != len(content)
-                    or _read_confined_regular_file(
-                        destination / existing.raw_file,
-                        destination,
-                        "raw intake file",
-                    )
-                    != content
-                ):
+                if not matches_existing(existing):
                     raise StorageError(
                         "concurrent intake identity collides with different content"
                     )

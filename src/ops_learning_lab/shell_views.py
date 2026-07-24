@@ -61,6 +61,9 @@ def _match_summary(match: PackMatch) -> str:
     if match.kind == "strong":
         candidate = match.candidates[0]
         return f"Proposed destination: {candidate.title}"
+    if match.kind == "selected":
+        candidate = match.candidates[0]
+        return f"Learner-selected destination: {candidate.title}"
     if match.kind == "ambiguous":
         return "Learner choice required"
     return "Proposed new Learning Pack"
