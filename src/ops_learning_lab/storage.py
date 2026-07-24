@@ -221,13 +221,14 @@ class LearningHome:
         )
         _require_owned_private_directory(inbox, self.root, "private inbox")
         content_digest = sha256(content).hexdigest()
-        identity = b"\0".join(
-            (
-                source.source_type.encode("utf-8"),
-                source.source_id.encode("utf-8"),
-                content_digest.encode("ascii"),
-            )
-        )
+        identity_parts = [
+            source.source_type.encode("utf-8"),
+            source.source_id.encode("utf-8"),
+            content_digest.encode("ascii"),
+        ]
+        if source.retrieval_scope is not None:
+            identity_parts.append(source.retrieval_scope.encode("utf-8"))
+        identity = b"\0".join(identity_parts)
         intake_id = f"intake-{sha256(identity).hexdigest()[:20]}"
         destination = inbox / intake_id
         if destination.is_symlink():
@@ -250,6 +251,7 @@ class LearningHome:
             same_source = (
                 existing.source.source_type == source.source_type
                 and existing.source.source_id == source.source_id
+                and existing.source.retrieval_scope == source.retrieval_scope
             )
             if (
                 not same_source
@@ -293,6 +295,7 @@ class LearningHome:
                 if (
                     existing.source.source_type != source.source_type
                     or existing.source.source_id != source.source_id
+                    or existing.source.retrieval_scope != source.retrieval_scope
                     or existing.content_sha256 != content_digest
                     or existing.byte_count != len(content)
                     or _read_confined_regular_file(

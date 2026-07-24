@@ -34,6 +34,7 @@ deterministic match -> immutable staged proposal -> explicit Promotion
 - [Version one product specification](docs/specs/v1.md)
 - [Architecture decisions](docs/adr/)
 - [Capture Mode guide](docs/capture-mode.md)
+- [Explicit Codex import guide](docs/codex-import.md)
 - [Staged Pack Update contract](docs/staged-update-contract.md)
 - [Promotion guide](docs/promotion.md)
 - [Accepted Learning Pack contract](docs/accepted-pack-contract.md)

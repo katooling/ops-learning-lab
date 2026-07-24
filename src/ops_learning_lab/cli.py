@@ -11,6 +11,12 @@ import stat
 import sys
 from typing import Sequence
 
+from .codex_import import (
+    CodexImportError,
+    CodexImportRequest,
+    CodexImportService,
+    ProductShellLearningPort,
+)
 from .bundle_repository import BundleRepository
 from .compiler import compile_update, validate_capture_text
 from .domain import SchemaError, SourceReference
@@ -57,6 +63,12 @@ def _parser() -> argparse.ArgumentParser:
     capture.add_argument("--source-id", required=True)
     capture.add_argument("--observed-at", default=None)
     capture.add_argument("--input", type=Path, required=True)
+
+    codex_import = subcommands.add_parser(
+        "codex-import",
+        help="explicitly import one strict-JSON Codex learning request from stdin",
+    )
+    codex_import.add_argument("--home", type=Path, required=True)
 
     audit = subcommands.add_parser(
         "audit-privacy", help="prove canary bytes are absent from publishable areas"
@@ -243,6 +255,32 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0
 
+        if arguments.command == "codex-import":
+            encoded = sys.stdin.buffer.read(MAX_CAPTURE_BYTES + 1)
+            if len(encoded) > MAX_CAPTURE_BYTES:
+                raise StorageError(
+                    f"Codex import exceeds the {MAX_CAPTURE_BYTES}-byte safety limit"
+                )
+            request = CodexImportRequest.from_dict(
+                decode_json_object(encoded, "Codex import request")
+            )
+            home = LearningHome.open(arguments.home)
+            attempts = EventAttemptStore.open(home.root)
+            try:
+                learning = LearningService(
+                    PackRepository.open(home.root),
+                    BundleRepository.open(home.root),
+                    attempts,
+                )
+                result = CodexImportService(
+                    home,
+                    learning_port=ProductShellLearningPort(learning),
+                ).run(request)
+            finally:
+                attempts.close()
+            _emit(result)
+            return 0
+
         if arguments.command == "audit-privacy":
             home = LearningHome.open(arguments.home)
             leaks = home.audit_canary(arguments.canary_file.read_bytes())
@@ -403,6 +441,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
     except (
         OSError,
+        CodexImportError,
         JsonContractError,
         SchemaError,
         StorageError,
