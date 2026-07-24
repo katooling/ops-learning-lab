@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.coverage
+.pytest_cache/
+.ruff_cache/
+.venv/
+build/
+dist/
+*.egg-info/
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# Runtime learning homes and raw intake never belong in the source repository.
+.ops-learning-lab/
+private/
+exports/
+*.jsonl
