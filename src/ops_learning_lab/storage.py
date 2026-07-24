@@ -29,7 +29,15 @@ class StorageError(RuntimeError):
     """Raised when a learning home violates its filesystem contract."""
 
 
-def _write_atomic(path: Path, data: bytes, mode: int) -> None:
+@dataclass(frozen=True, slots=True)
+class AtomicWriteOutcome:
+    """Truthful result once an atomic replacement is visible."""
+
+    replaced: bool
+    directory_synced: bool
+
+
+def _write_atomic(path: Path, data: bytes, mode: int) -> AtomicWriteOutcome:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.", dir=path.parent
@@ -42,6 +50,19 @@ def _write_atomic(path: Path, data: bytes, mode: int) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         temporary.replace(path)
+        try:
+            directory_descriptor = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+        except OSError:
+            # os.replace is the commit point: callers must not report an ordinary
+            # failure after the intended file is already visible. A caller that
+            # needs stronger proof can re-read the target when durability was not
+            # confirmed.
+            return AtomicWriteOutcome(replaced=True, directory_synced=False)
+        return AtomicWriteOutcome(replaced=True, directory_synced=True)
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
