@@ -8,15 +8,21 @@ import re
 import tempfile
 from threading import Thread
 import unittest
+from unittest.mock import patch
 from urllib.parse import urlencode
 
 from ops_learning_lab._bound_directory import _BoundDirectory
 from ops_learning_lab.attempts import EvidenceDecision
-from ops_learning_lab.learner_state import EventAttemptStore, LearnerStateError
+from ops_learning_lab.learner_state import (
+    EventAttemptStore,
+    LearnerStateError,
+    LearnerStateEvent,
+)
 from ops_learning_lab.learning import LearnerAttemptRecord, evaluate_attempt
 from ops_learning_lab.learning_service import LearningError, LearningService
 from ops_learning_lab.lesson_content import build_codex_etl_bundle
 from ops_learning_lab.bundle_repository import BundleRepository
+from ops_learning_lab.promotion_models import AcceptedPackSnapshot
 from ops_learning_lab.storage import LearningHome, StorageError
 from ops_learning_lab.shell import make_server
 from ops_learning_lab.staging import PackUpdateRepository
@@ -45,6 +51,147 @@ class BoundDirectoryAppendTests(unittest.TestCase):
 
 
 class AppendOnlyLearnerHistoryTests(unittest.TestCase):
+    def test_unrecognized_dotfile_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = LearningHome.initialize(Path(directory) / "learning-home")
+            events = home.root / "private/learner-state/events"
+            store = EventAttemptStore.open(home.root)
+            (events / ".mystery").write_text("not an event", encoding="utf-8")
+
+            with self.assertRaisesRegex(LearnerStateError, "unexpected file"):
+                store.history()
+            store.close()
+
+    def test_visible_event_is_recoverable_when_directory_fsync_is_unavailable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = LearningHome.initialize(Path(directory) / "learning-home")
+            initial = _initial_checkpoint(completed_attempt())
+            store = EventAttemptStore.open(home.root)
+            with patch.object(
+                _BoundDirectory,
+                "_sync_directory",
+                return_value=False,
+            ):
+                self.assertEqual(
+                    store.save(initial, expected_checkpoint_sha256=None),
+                    initial,
+                )
+            self.assertEqual(store.get(initial.attempt_id), initial)
+            store.close()
+
+            reopened = EventAttemptStore.open(home.root)
+            self.assertEqual(reopened.get(initial.attempt_id), initial)
+            reopened.close()
+
+    def test_backward_time_and_identity_mutation_do_not_append_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = LearningHome.initialize(Path(directory) / "learning-home")
+            store = EventAttemptStore.open(home.root)
+            initial = _initial_checkpoint(completed_attempt())
+            predicted = initial.evolve(
+                updated_at="2026-07-24T12:02:00Z",
+                next_step="predict",
+            )
+            store.save(initial, expected_checkpoint_sha256=None)
+            store.save(
+                predicted,
+                expected_checkpoint_sha256=initial.checkpoint_sha256,
+            )
+            before = _event_bytes(home.root)
+
+            backwards = predicted.evolve(
+                updated_at="2026-07-24T12:01:00Z",
+                next_step="try",
+                prediction=completed_attempt().prediction,
+            )
+            with self.assertRaisesRegex(
+                LearnerStateError,
+                "time cannot move backwards",
+            ):
+                store.save(
+                    backwards,
+                    expected_checkpoint_sha256=predicted.checkpoint_sha256,
+                )
+            self.assertEqual(_event_bytes(home.root), before)
+
+            changed_identity = _rebuild_checkpoint(
+                predicted,
+                pack_sha256="f" * 64,
+            )
+            with self.assertRaisesRegex(
+                LearnerStateError,
+                "immutable identity",
+            ):
+                store.save(
+                    changed_identity,
+                    expected_checkpoint_sha256=predicted.checkpoint_sha256,
+                )
+            self.assertEqual(_event_bytes(home.root), before)
+
+            valid_try = predicted.evolve(
+                updated_at="2026-07-24T12:03:00Z",
+                next_step="try",
+                prediction=completed_attempt().prediction,
+            )
+            with self.assertRaisesRegex(
+                LearnerStateError,
+                "time cannot move backwards",
+            ):
+                store.save(
+                    valid_try,
+                    expected_checkpoint_sha256=predicted.checkpoint_sha256,
+                    occurred_at="2026-07-24T12:01:00Z",
+                )
+            self.assertEqual(_event_bytes(home.root), before)
+            store.close()
+
+    def test_replay_rejects_a_rehashed_illegal_identity_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = LearningHome.initialize(Path(directory) / "learning-home")
+            store = EventAttemptStore.open(home.root)
+            initial = _initial_checkpoint(completed_attempt())
+            store.save(initial, expected_checkpoint_sha256=None)
+            first = store.history().events[0]
+            changed = _rebuild_checkpoint(
+                initial.evolve(
+                    updated_at="2026-07-24T12:01:00Z",
+                    next_step="predict",
+                ),
+                bundle_sha256="e" * 64,
+            )
+            forged = LearnerStateEvent.build(
+                sequence=2,
+                event_type="checkpoint_saved",
+                occurred_at=changed.updated_at,
+                command_id="command-" + "9" * 20,
+                previous_event_sha256=first.event_sha256,
+                payload={
+                    "previous_checkpoint_sha256": initial.checkpoint_sha256,
+                    "checkpoint": changed.to_dict(),
+                },
+            )
+            event_path = (
+                home.root
+                / "private/learner-state/events"
+                / (
+                    f"{forged.sequence:020d}-event-"
+                    f"{forged.event_sha256[:20]}.json"
+                )
+            )
+            event_path.write_text(
+                json.dumps(forged.to_dict(), indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                LearnerStateError,
+                "immutable identity",
+            ):
+                store.history()
+            store.close()
+
     def test_event_directory_permission_drift_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             home = LearningHome.initialize(Path(directory) / "learning-home")
@@ -52,6 +199,57 @@ class AppendOnlyLearnerHistoryTests(unittest.TestCase):
             events.chmod(0o755)
             with self.assertRaisesRegex(LearnerStateError, "0700"):
                 EventAttemptStore.open(home.root)
+
+    def test_learning_home_allows_only_one_open_event_store(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = LearningHome.initialize(Path(directory) / "learning-home")
+            first = EventAttemptStore.open(home.root)
+            try:
+                with self.assertRaisesRegex(
+                    LearnerStateError,
+                    "already open",
+                ):
+                    EventAttemptStore.open(home.root)
+            finally:
+                first.close()
+
+            reopened = EventAttemptStore.open(home.root)
+            reopened.close()
+
+    def test_event_directory_replacement_fails_instead_of_hiding_history(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = LearningHome.initialize(Path(directory) / "learning-home")
+            store = EventAttemptStore.open(home.root)
+            initial = completed_attempt().evolve(
+                updated_at=completed_attempt().started_at,
+                next_step="map",
+                prediction=None,
+                renderer=_ready_renderer(completed_attempt()),
+                evidence=(),
+                explanation=None,
+                completed=False,
+            )
+            store.save(initial, expected_checkpoint_sha256=None)
+            events = home.root / "private/learner-state/events"
+            displaced = events.with_name("events-displaced")
+            events.rename(displaced)
+            events.mkdir(mode=0o700)
+
+            with self.assertRaisesRegex(LearnerStateError, "cannot list"):
+                store.history()
+            self.assertEqual(
+                len(
+                    tuple(
+                        path
+                        for path in displaced.iterdir()
+                        if not path.name.startswith(".")
+                    )
+                ),
+                1,
+            )
+            store.close()
 
     def test_reopen_restores_exact_checkpoint_and_idempotent_command(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -124,6 +322,59 @@ class AppendOnlyLearnerHistoryTests(unittest.TestCase):
                     expected_checkpoint_sha256=None,
                     attempt_kind="review",
                     review_of_attempt_id=original.attempt_id,
+                )
+            self.assertEqual(len(store.history().events), before)
+            store.close()
+
+    def test_one_demonstration_cannot_have_two_active_reviews(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = LearningHome.initialize(Path(directory) / "learning-home")
+            completed = completed_attempt()
+            prior = completed.evolve(
+                updated_at="2026-07-24T12:04:00Z",
+                next_step="explain",
+                explanation=None,
+                completed=False,
+            )
+            record = LearnerAttemptRecord.build(
+                completed,
+                evaluate_attempt(
+                    build_codex_etl_bundle(accepted_snapshot()),
+                    completed,
+                ),
+            )
+            first_review = _new_attempt_from(
+                prior,
+                "attempt-11111111111111111111",
+                "2026-07-31T12:00:00Z",
+            )
+            second_review = _new_attempt_from(
+                prior,
+                "attempt-22222222222222222222",
+                "2026-07-31T12:00:01Z",
+            )
+            store = EventAttemptStore.open(home.root)
+            self.assertEqual(
+                _persist_explain_checkpoint(store, completed),
+                prior,
+            )
+            store.complete(
+                record,
+                expected_checkpoint_sha256=prior.checkpoint_sha256,
+            )
+            store.save(
+                first_review,
+                expected_checkpoint_sha256=None,
+                attempt_kind="review",
+                review_of_attempt_id=completed.attempt_id,
+            )
+            before = len(store.history().events)
+            with self.assertRaisesRegex(LearnerStateError, "active review"):
+                store.save(
+                    second_review,
+                    expected_checkpoint_sha256=None,
+                    attempt_kind="review",
+                    review_of_attempt_id=completed.attempt_id,
                 )
             self.assertEqual(len(store.history().events), before)
             store.close()
@@ -208,7 +459,10 @@ class AppendOnlyLearnerHistoryTests(unittest.TestCase):
                 evaluate_attempt(bundle, completed),
             )
             store = EventAttemptStore.open(home.root)
-            store.save(prior, expected_checkpoint_sha256=None)
+            self.assertEqual(
+                _persist_explain_checkpoint(store, completed),
+                prior,
+            )
             store.complete(
                 record,
                 expected_checkpoint_sha256=prior.checkpoint_sha256,
@@ -220,12 +474,70 @@ class AppendOnlyLearnerHistoryTests(unittest.TestCase):
             self.assertEqual(entry.completed_at, completed.updated_at)
             store.close()
 
+    def test_completion_and_restart_cannot_change_active_context(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = LearningHome.initialize(Path(directory) / "learning-home")
+            completed = completed_attempt()
+            prior = _persist_explain_checkpoint(
+                store := EventAttemptStore.open(home.root),
+                completed,
+            )
+            before = _event_bytes(home.root)
+
+            changed_completion = _rebuild_checkpoint(
+                completed,
+                outcome_revision_sha256="d" * 64,
+            )
+            changed_record = LearnerAttemptRecord.build(
+                changed_completion,
+                evaluate_attempt(
+                    build_codex_etl_bundle(accepted_snapshot()),
+                    changed_completion,
+                ),
+            )
+            with self.assertRaisesRegex(
+                LearnerStateError,
+                "immutable identity",
+            ):
+                store.complete(
+                    changed_record,
+                    expected_checkpoint_sha256=prior.checkpoint_sha256,
+                )
+            self.assertEqual(_event_bytes(home.root), before)
+
+            replacement = _rebuild_checkpoint(
+                _new_attempt_from(
+                    prior,
+                    "attempt-fedcba9876543210abcd",
+                    "2026-07-24T12:06:00Z",
+                ),
+                lesson_revision_sha256="c" * 64,
+            )
+            with self.assertRaisesRegex(
+                LearnerStateError,
+                "immutable Learner Attempt context",
+            ):
+                store.restart(
+                    prior.attempt_id,
+                    replacement,
+                    expected_checkpoint_sha256=prior.checkpoint_sha256,
+                )
+            self.assertEqual(_event_bytes(home.root), before)
+            store.close()
+
 
 class DurableLearningJourneyTests(unittest.TestCase):
     class Packs:
         def snapshot(self, pack_id: str):
             snapshot = accepted_snapshot()
             return snapshot if pack_id == snapshot.pack_id else None
+
+    class MutablePacks:
+        def __init__(self, snapshot: AcceptedPackSnapshot) -> None:
+            self.current = snapshot
+
+        def snapshot(self, pack_id: str):
+            return self.current if pack_id == self.current.pack_id else None
 
     def test_restart_restores_exact_mid_attempt_input_and_loop_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -350,6 +662,8 @@ class DurableLearningJourneyTests(unittest.TestCase):
                 service.start_review(
                     "codex-etl",
                     "lesson-codex-etl-quality",
+                    demonstrated.attempt.attempt_id,
+                    demonstrated.attempt.bundle_sha256,
                 )
             self.assertEqual(len(store.history().events), event_count)
 
@@ -357,6 +671,8 @@ class DurableLearningJourneyTests(unittest.TestCase):
             review = service.start_review(
                 "codex-etl",
                 "lesson-codex-etl-quality",
+                demonstrated.attempt.attempt_id,
+                demonstrated.attempt.bundle_sha256,
             )
             self.assertEqual(review.review.status, "in-progress")
             retained = _complete_service_attempt(
@@ -400,6 +716,8 @@ class DurableLearningJourneyTests(unittest.TestCase):
             review = service.start_review(
                 "codex-etl",
                 "lesson-codex-etl-quality",
+                demonstrated.attempt.attempt_id,
+                demonstrated.attempt.bundle_sha256,
             )
             unsuccessful = _complete_service_attempt(
                 service,
@@ -433,6 +751,84 @@ class DurableLearningJourneyTests(unittest.TestCase):
             )
             store.close()
 
+    def test_later_pack_promotion_does_not_strand_due_review(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = LearningHome.initialize(Path(directory) / "learning-home")
+            clock = MutableClock("2026-07-24T12:00:00Z")
+            first_snapshot = accepted_snapshot()
+            packs = self.MutablePacks(first_snapshot)
+            ids = iter(
+                (
+                    "attempt-11111111111111111111",
+                    "attempt-22222222222222222222",
+                )
+            )
+            store = EventAttemptStore.open(home.root)
+            service = LearningService(
+                packs,
+                BundleRepository.open(home.root),
+                store,
+                clock=clock,
+                attempt_id_factory=lambda: next(ids),
+            )
+            demonstrated = _complete_service_attempt(service)
+            original_bundle_sha256 = demonstrated.attempt.bundle_sha256
+
+            packs.current = AcceptedPackSnapshot(
+                pack_id=first_snapshot.pack_id,
+                title=first_snapshot.title,
+                version=2,
+                content_sha256="b" * 64,
+                claims=first_snapshot.claims,
+            )
+            clock.value = "2026-07-31T12:00:00Z"
+            overview = service.open_lesson(
+                "codex-etl",
+                "lesson-codex-etl-quality",
+            )
+            self.assertEqual(overview.bundle.pack_version, 2)
+            self.assertEqual(overview.mastery.state, "captured")
+            self.assertEqual(overview.review.status, "due")
+            self.assertEqual(
+                overview.review.demonstrated_by_attempt_id,
+                demonstrated.attempt.attempt_id,
+            )
+
+            before = len(store.history().events)
+            with self.assertRaisesRegex(
+                LearningError,
+                "does not match",
+            ):
+                service.start_review(
+                    "codex-etl",
+                    "lesson-codex-etl-quality",
+                    demonstrated.attempt.attempt_id,
+                    "f" * 64,
+                )
+            self.assertEqual(len(store.history().events), before)
+
+            review = service.start_review(
+                "codex-etl",
+                "lesson-codex-etl-quality",
+                demonstrated.attempt.attempt_id,
+                demonstrated.attempt.bundle_sha256,
+            )
+            self.assertEqual(review.attempt.pack_version, 1)
+            self.assertEqual(
+                review.attempt.bundle_sha256,
+                original_bundle_sha256,
+            )
+            retained = _complete_service_attempt(
+                service,
+                attempt_id=review.attempt.attempt_id,
+            )
+            self.assertEqual(retained.mastery.state, "retained")
+            self.assertEqual(
+                retained.mastery.earned_by_attempt_id,
+                review.attempt.attempt_id,
+            )
+            store.close()
+
     def test_product_shell_due_view_is_read_only_and_starts_exact_review(
         self,
     ) -> None:
@@ -453,7 +849,7 @@ class DurableLearningJourneyTests(unittest.TestCase):
                 clock=clock,
                 attempt_id_factory=lambda: next(ids),
             )
-            _complete_service_attempt(service)
+            demonstrated = _complete_service_attempt(service)
             clock.value = "2026-07-31T12:00:00Z"
             before = len(store.history().events)
 
@@ -486,12 +882,28 @@ class DurableLearningJourneyTests(unittest.TestCase):
                     r'name="csrf-token" value="([0-9a-f]{64})"',
                     body,
                 )
+                review_of = re.search(
+                    r'name="review-of-attempt-id" value="([^"]+)"',
+                    body,
+                )
+                review_bundle = re.search(
+                    r'name="review-bundle-sha256" value="([0-9a-f]{64})"',
+                    body,
+                )
                 assert csrf is not None
+                assert review_of is not None
+                assert review_bundle is not None
                 status, _, location = _http_request(
                     connection,
                     "POST",
                     f"{path}/review",
-                    urlencode({"csrf-token": csrf.group(1)}),
+                    urlencode(
+                        {
+                            "csrf-token": csrf.group(1),
+                            "review-of-attempt-id": review_of.group(1),
+                            "review-bundle-sha256": review_bundle.group(1),
+                        }
+                    ),
                 )
                 self.assertEqual(status, 303)
                 self.assertEqual(
@@ -531,7 +943,7 @@ class DurableLearningJourneyTests(unittest.TestCase):
                 clock=clock,
                 attempt_id_factory=lambda: next(next_id),
             )
-            _complete_service_attempt(service)
+            demonstrated = _complete_service_attempt(service)
             clock.value = "2026-07-31T12:00:00Z"
 
             def begin():
@@ -539,6 +951,8 @@ class DurableLearningJourneyTests(unittest.TestCase):
                     return service.start_review(
                         "codex-etl",
                         "lesson-codex-etl-quality",
+                        demonstrated.attempt.attempt_id,
+                        demonstrated.attempt.bundle_sha256,
                     ).attempt.attempt_id
                 except LearningError as exc:
                     return str(exc)
@@ -654,6 +1068,53 @@ def _ready_renderer(attempt):
     )
 
 
+def _initial_checkpoint(completed):
+    return completed.evolve(
+        updated_at=completed.started_at,
+        next_step="map",
+        prediction=None,
+        renderer=_ready_renderer(completed),
+        evidence=(),
+        explanation=None,
+        completed=False,
+    )
+
+
+def _event_bytes(home: Path) -> dict[str, bytes]:
+    event_directory = home / "private/learner-state/events"
+    return {
+        path.name: path.read_bytes()
+        for path in event_directory.iterdir()
+        if not path.name.startswith(".")
+    }
+
+
+def _rebuild_checkpoint(attempt, **changes):
+    from ops_learning_lab.attempts import AttemptCheckpoint
+
+    content = {
+        key: value
+        for key, value in attempt.to_dict().items()
+        if key not in {"schema_version", "checkpoint_sha256"}
+    }
+    content.update(changes)
+    content["prediction"] = attempt.prediction
+    content["renderer"] = attempt.renderer
+    content["evidence"] = attempt.evidence
+    content["explanation"] = attempt.explanation
+    content["hints"] = attempt.hints
+    for key in (
+        "prediction",
+        "renderer",
+        "evidence",
+        "explanation",
+        "hints",
+    ):
+        if key in changes:
+            content[key] = changes[key]
+    return AttemptCheckpoint.build(**content)
+
+
 def _new_attempt_from(attempt, attempt_id: str, started_at: str):
     from ops_learning_lab.attempts import AttemptCheckpoint
 
@@ -677,6 +1138,54 @@ def _new_attempt_from(attempt, attempt_id: str, started_at: str):
         hints=(),
         completed=False,
     )
+
+
+def _persist_explain_checkpoint(
+    store: EventAttemptStore,
+    completed,
+):
+    initial = completed.evolve(
+        updated_at=completed.started_at,
+        next_step="map",
+        prediction=None,
+        renderer=_ready_renderer(completed),
+        evidence=(),
+        explanation=None,
+        completed=False,
+    )
+    checkpoints = (
+        initial.evolve(
+            updated_at="2026-07-24T12:01:00Z",
+            next_step="predict",
+        ),
+        initial.evolve(
+            updated_at="2026-07-24T12:02:00Z",
+            next_step="try",
+            prediction=completed.prediction,
+        ),
+        initial.evolve(
+            updated_at="2026-07-24T12:03:00Z",
+            next_step="prove",
+            prediction=completed.prediction,
+            renderer=completed.renderer,
+        ),
+        initial.evolve(
+            updated_at="2026-07-24T12:04:00Z",
+            next_step="explain",
+            prediction=completed.prediction,
+            renderer=completed.renderer,
+            evidence=completed.evidence,
+        ),
+    )
+    store.save(initial, expected_checkpoint_sha256=None)
+    previous = initial
+    for checkpoint in checkpoints:
+        store.save(
+            checkpoint,
+            expected_checkpoint_sha256=previous.checkpoint_sha256,
+        )
+        previous = checkpoint
+    return previous
 
 
 if __name__ == "__main__":

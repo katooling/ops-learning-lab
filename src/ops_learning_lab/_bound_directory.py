@@ -169,6 +169,58 @@ class _BoundDirectory:
             os.close(descriptor)
             raise
 
+    def list_names(self) -> tuple[str, ...]:
+        """List the retained directory inode, failing if its path was replaced."""
+
+        self._require_open()
+        self._validate_bound_descriptor()
+        self._require_path_binding()
+        try:
+            names = tuple(os.listdir(self._descriptor))
+        except OSError as exc:
+            raise StorageError(f"cannot list {self._label}") from exc
+        self._require_path_binding()
+        return names
+
+    def open_lock(self, name: str, label: str) -> int:
+        """Open one private advisory-lock file relative to this directory."""
+
+        self._require_open()
+        self._require_leaf_name(name)
+        self._validate_bound_descriptor()
+        self._require_path_binding()
+        flags = (
+            os.O_RDWR
+            | os.O_CREAT
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        try:
+            descriptor = os.open(
+                name,
+                flags,
+                0o600,
+                dir_fd=self._descriptor,
+            )
+        except OSError as exc:
+            raise StorageError(f"cannot open {label}") from exc
+        try:
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or (
+                    hasattr(os, "getuid")
+                    and metadata.st_uid != os.getuid()
+                )
+                or metadata.st_mode & 0o077
+            ):
+                raise StorageError(f"{label} is unsafe")
+            self._require_path_binding()
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+
     def _read_regular_bound(self, name: str, label: str) -> bytes | None:
         flags = (
             os.O_RDONLY

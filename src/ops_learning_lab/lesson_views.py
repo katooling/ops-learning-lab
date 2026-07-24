@@ -50,21 +50,45 @@ def attempt_page(view: LearningView, csrf_token: str) -> bytes:
     if attempt is None:
         raise ValueError("attempt_page requires a Learner Attempt")
     lesson = view.lesson
+    history_entry = next(
+        (
+            entry
+            for entry in view.history
+            if entry.checkpoint.attempt_id == attempt.attempt_id
+        ),
+        None,
+    )
+    if history_entry is not None and history_entry.status == "reset":
+        content = (
+            "<section><h2>Reset attempt</h2>"
+            "<p><strong>This attempt is read-only.</strong> A whole-attempt "
+            "restart preserved this checkpoint in history and continued with "
+            "a new Learner Attempt ID.</p>"
+            f"<p>Last saved step: {escape(attempt.next_step.title())}.</p>"
+            f"<p>Replacement attempt: <a href=\"/attempts/"
+            f"{escape(history_entry.reset_by_attempt_id or '')}\"><code>"
+            f"{escape(history_entry.reset_by_attempt_id or '')}</code></a></p>"
+            "</section>"
+        )
+    else:
+        content = (
+            _progress(attempt.next_step)
+            + _step(view, csrf_token)
+            + (
+                _form(
+                    view,
+                    csrf_token,
+                    "restart",
+                    '<button type="submit">Restart this whole attempt</button>',
+                )
+                if not attempt.completed
+                else ""
+            )
+        )
     return _layout(
         lesson.title,
         f"<h1>{escape(lesson.title)}</h1>"
-        + _progress(attempt.next_step)
-        + _step(view, csrf_token)
-        + (
-            _form(
-                view,
-                csrf_token,
-                "restart",
-                '<button type="submit">Restart this whole attempt</button>',
-            )
-            if not attempt.completed
-            else ""
-        )
+        + content
         + "<hr><details><summary>Attempt identity</summary><dl>"
         f"<dt>Learner Attempt ID</dt><dd><code>{escape(attempt.attempt_id)}</code></dd>"
         f"<dt>Lesson revision</dt><dd><code>{escape(attempt.lesson_revision_sha256)}</code></dd>"
@@ -314,6 +338,10 @@ def _review_status(view: LearningView, csrf_token: str) -> str:
         form = (
             f'<form method="post" action="{action}">'
             f'<input type="hidden" name="csrf-token" value="{escape(csrf_token)}">'
+            f'<input type="hidden" name="review-of-attempt-id" '
+            f'value="{escape(review.demonstrated_by_attempt_id or "")}">'
+            f'<input type="hidden" name="review-bundle-sha256" '
+            f'value="{escape(_review_bundle_sha256(view))}">'
             '<button type="submit">Begin due review</button></form>'
             if csrf_token
             else ""
@@ -323,6 +351,20 @@ def _review_status(view: LearningView, csrf_token: str) -> str:
         "Review scheduled"
     )
     return f"<p><strong>{label}:</strong> {due}.</p>"
+
+
+def _review_bundle_sha256(view: LearningView) -> str:
+    source = view.review.demonstrated_by_attempt_id
+    if source is None:
+        return ""
+    return next(
+        (
+            entry.checkpoint.bundle_sha256
+            for entry in view.history
+            if entry.checkpoint.attempt_id == source
+        ),
+        "",
+    )
 
 
 def _history(view: LearningView) -> str:

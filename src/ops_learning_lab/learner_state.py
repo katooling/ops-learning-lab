@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
+import fcntl
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import re
 from threading import RLock
@@ -15,12 +17,14 @@ from ._bound_directory import _BoundDirectory
 from .attempts import AttemptCheckpoint
 from .domain import SHA256_PATTERN, SchemaError
 from .json_contract import JsonContractError, decode_json_object
-from .learning import (
-    LearnerAttemptRecord,
-    MasteryProjection,
-    derive_mastery,
+from .learner_errors import LearnerStateError
+from .learner_transitions import (
+    require_checkpoint_transition,
+    require_completion_transition,
+    require_restart_transition,
+    require_start,
 )
-from .learning_bundle import LearningPackBundle
+from .learning import LearnerAttemptRecord
 from .storage import LEARNER_EVENT_DIRECTORY, StorageError
 
 
@@ -37,11 +41,11 @@ ATTEMPT_KINDS = frozenset({"learning", "review"})
 EVENT_FILE_PATTERN = re.compile(
     r"^(?P<sequence>[0-9]{20})-event-(?P<short>[0-9a-f]{20})\.json$"
 )
+EVENT_TEMP_FILE_PATTERN = re.compile(
+    r"^\.[0-9]{20}-event-[0-9a-f]{20}\.json\.[0-9a-f]{16}\.tmp$"
+)
+EVENT_LOCK_FILE = ".events.lock"
 COMMAND_ID_PATTERN = re.compile(r"^command-[0-9a-f]{20}$")
-
-
-class LearnerStateError(StorageError):
-    """Raised when durable learner state is unsafe, corrupt, or stale."""
 
 
 def _canonical_bytes(value: dict[str, Any]) -> bytes:
@@ -270,171 +274,6 @@ class LearnerHistory:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class ReviewProjection:
-    status: str
-    due_at: str | None
-    demonstrated_by_attempt_id: str | None
-    latest_review_attempt_id: str | None
-
-    def __post_init__(self) -> None:
-        if self.status not in {
-            "not-scheduled",
-            "scheduled",
-            "due",
-            "in-progress",
-            "retry-scheduled",
-            "retained",
-        }:
-            raise LearnerStateError("review status is invalid")
-        if self.status == "not-scheduled":
-            if any(
-                value is not None
-                for value in (
-                    self.due_at,
-                    self.demonstrated_by_attempt_id,
-                    self.latest_review_attempt_id,
-                )
-            ):
-                raise LearnerStateError("unscheduled review cannot name artifacts")
-        elif self.status == "retained":
-            if (
-                self.due_at is not None
-                or self.demonstrated_by_attempt_id is None
-                or self.latest_review_attempt_id is None
-            ):
-                raise LearnerStateError("retained review artifacts are incomplete")
-        elif self.due_at is None or self.demonstrated_by_attempt_id is None:
-            raise LearnerStateError("scheduled review artifacts are incomplete")
-
-
-@dataclass(frozen=True, slots=True)
-class LearningStateProjection:
-    mastery: MasteryProjection
-    review: ReviewProjection
-
-
-def project_learning_state(
-    bundle: LearningPackBundle,
-    history: LearnerHistory,
-    now: str,
-) -> LearningStateProjection:
-    """Derive mastery and review timing only from immutable event history."""
-
-    current_time = _parse_time(now)
-    matching = tuple(
-        entry
-        for entry in history.attempts
-        if _matches_bundle(entry.checkpoint, bundle)
-    )
-    baseline = derive_mastery(
-        bundle,
-        tuple(entry.checkpoint for entry in matching),
-    )
-    demonstrations = tuple(
-        entry
-        for entry in matching
-        if entry.status == "completed"
-        and entry.attempt_kind == "learning"
-        and entry.completed_record is not None
-        and entry.completed_record.evaluation is not None
-        and entry.completed_record.evaluation.qualifies
-    )
-    if not demonstrations:
-        return LearningStateProjection(
-            baseline,
-            ReviewProjection("not-scheduled", None, None, None),
-        )
-
-    demonstration = demonstrations[0]
-    assert demonstration.completed_at is not None
-    due = _parse_time(demonstration.completed_at) + timedelta(days=7)
-    reviews = tuple(
-        entry
-        for entry in matching
-        if entry.attempt_kind == "review"
-        and entry.review_of_attempt_id
-        == demonstration.checkpoint.attempt_id
-    )
-    latest_review_id: str | None = None
-    retry = False
-    for review in reviews:
-        latest_review_id = review.checkpoint.attempt_id
-        if review.status == "active":
-            return LearningStateProjection(
-                MasteryProjection(
-                    "demonstrated",
-                    demonstration.checkpoint.attempt_id,
-                ),
-                ReviewProjection(
-                    "in-progress",
-                    _format_time(due),
-                    demonstration.checkpoint.attempt_id,
-                    latest_review_id,
-                ),
-            )
-        if (
-            review.status == "completed"
-            and review.completed_record is not None
-            and review.completed_record.evaluation is not None
-        ):
-            if (
-                review.completed_record.evaluation.qualifies
-                and _parse_time(review.checkpoint.started_at) >= due
-            ):
-                return LearningStateProjection(
-                    MasteryProjection(
-                        "retained",
-                        review.checkpoint.attempt_id,
-                    ),
-                    ReviewProjection(
-                        "retained",
-                        None,
-                        demonstration.checkpoint.attempt_id,
-                        review.checkpoint.attempt_id,
-                    ),
-                )
-            assert review.completed_at is not None
-            due = _parse_time(review.completed_at) + timedelta(days=1)
-            retry = True
-
-    if current_time >= due:
-        status = "due"
-    else:
-        status = "retry-scheduled" if retry else "scheduled"
-    return LearningStateProjection(
-        MasteryProjection(
-            "demonstrated",
-            demonstration.checkpoint.attempt_id,
-        ),
-        ReviewProjection(
-            status,
-            _format_time(due),
-            demonstration.checkpoint.attempt_id,
-            latest_review_id,
-        ),
-    )
-
-
-def _matches_bundle(
-    checkpoint: AttemptCheckpoint,
-    bundle: LearningPackBundle,
-) -> bool:
-    lesson = bundle.lessons[0]
-    return (
-        checkpoint.pack_id == bundle.pack_id
-        and checkpoint.pack_version == bundle.pack_version
-        and checkpoint.pack_sha256 == bundle.accepted_snapshot_sha256
-        and checkpoint.bundle_sha256 == bundle.bundle_sha256
-        and checkpoint.lesson_id == lesson.lesson_id
-        and checkpoint.lesson_revision_sha256
-        == lesson.lesson_revision_sha256
-        and checkpoint.outcome_id == lesson.outcome.outcome_id
-        and checkpoint.outcome_revision_sha256
-        == lesson.outcome.outcome_revision_sha256
-    )
-
-
 def _parse_time(value: str) -> datetime:
     _rfc3339(value, "projection time")
     parsed = datetime.fromisoformat(
@@ -443,33 +282,62 @@ def _parse_time(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _format_time(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
 class EventAttemptStore:
     """One private append-only event stream with fail-closed replay."""
 
-    def __init__(self, events: _BoundDirectory) -> None:
+    def __init__(
+        self,
+        events: _BoundDirectory,
+        lock_descriptor: int,
+    ) -> None:
         self._events = events
+        self._lock_descriptor = lock_descriptor
         self._lock = RLock()
 
     @classmethod
     def open(cls, home: str | Path) -> EventAttemptStore:
         root = Path(home).expanduser().resolve()
         path = root / LEARNER_EVENT_DIRECTORY
+        events: _BoundDirectory | None = None
+        lock_descriptor = -1
         try:
-            return cls(
-                _BoundDirectory.open(
-                    path,
-                    "learner event directory",
-                    private=True,
-                )
+            events = _BoundDirectory.open(
+                path,
+                "learner event directory",
+                private=True,
             )
-        except StorageError as exc:
+            lock_descriptor = events.open_lock(
+                EVENT_LOCK_FILE,
+                "learner event lock",
+            )
+            try:
+                fcntl.flock(
+                    lock_descriptor,
+                    fcntl.LOCK_EX | fcntl.LOCK_NB,
+                )
+            except BlockingIOError as exc:
+                raise LearnerStateError(
+                    "learner event history is already open"
+                ) from exc
+            return cls(events, lock_descriptor)
+        except BaseException as exc:
+            if lock_descriptor >= 0:
+                os.close(lock_descriptor)
+            if events is not None:
+                events.close()
+            if isinstance(exc, LearnerStateError):
+                raise
+            if not isinstance(exc, StorageError):
+                raise LearnerStateError(
+                    "cannot lock learner event history"
+                ) from exc
             raise LearnerStateError(str(exc)) from exc
 
     def close(self) -> None:
+        if self._lock_descriptor >= 0:
+            fcntl.flock(self._lock_descriptor, fcntl.LOCK_UN)
+            os.close(self._lock_descriptor)
+            self._lock_descriptor = -1
         self._events.close()
 
     def get(self, attempt_id: str) -> AttemptCheckpoint | None:
@@ -519,10 +387,22 @@ class EventAttemptStore:
                 if checkpoint.completed:
                     raise LearnerStateError("new Learner Attempt must start incomplete")
                 if attempt_kind == "review":
-                    self._require_demonstration_source(
-                        history.get(review_of_attempt_id or "")
+                    self._require_review_source(
+                        history.get(review_of_attempt_id or ""),
+                        checkpoint,
                     )
+                    if any(
+                        entry.attempt_kind == "review"
+                        and entry.review_of_attempt_id
+                        == review_of_attempt_id
+                        and entry.status == "active"
+                        for entry in history.attempts
+                    ):
+                        raise LearnerStateError(
+                            "demonstration already has an active review"
+                        )
                 event_type = "attempt_started"
+                require_start(checkpoint, occurred_at)
                 payload = {
                     "attempt_kind": attempt_kind,
                     "review_of_attempt_id": review_of_attempt_id,
@@ -544,6 +424,11 @@ class EventAttemptStore:
                     raise LearnerStateError(
                         "terminal checkpoint requires its evaluated record"
                     )
+                require_checkpoint_transition(
+                    existing.checkpoint,
+                    checkpoint,
+                    occurred_at,
+                )
                 event_type = "checkpoint_saved"
                 payload = {
                     "previous_checkpoint_sha256": (
@@ -595,6 +480,11 @@ class EventAttemptStore:
                 existing.attempt_kind,
                 existing.review_of_attempt_id,
             )
+            require_completion_transition(
+                existing.checkpoint,
+                checkpoint,
+                occurred_at,
+            )
             self._append(
                 history.events,
                 event_type="attempt_completed",
@@ -641,6 +531,11 @@ class EventAttemptStore:
                 raise LearnerStateError("Learner Attempt checkpoint is stale")
             if history.get(checkpoint.attempt_id) is not None:
                 raise LearnerStateError("replacement Learner Attempt already exists")
+            require_restart_transition(
+                previous.checkpoint,
+                checkpoint,
+                occurred_at,
+            )
             self._append(
                 history.events,
                 event_type="attempt_reset_and_restarted",
@@ -665,6 +560,12 @@ class EventAttemptStore:
         command_id: str,
         payload: dict[str, Any],
     ) -> LearnerStateEvent:
+        if events and _parse_time(occurred_at) < _parse_time(
+            events[-1].occurred_at
+        ):
+            raise LearnerStateError(
+                "learner event time cannot move backwards"
+            )
         event = LearnerStateEvent.build(
             sequence=len(events) + 1,
             event_type=event_type,
@@ -685,17 +586,30 @@ class EventAttemptStore:
             indent=2,
             sort_keys=True,
         ).encode("utf-8") + b"\n"
-        self._events.atomic_create(name, encoded, 0o600)
+        outcome = self._events.atomic_create(name, encoded, 0o600)
+        visible = self._events.read_regular(name, "learner event")
+        if visible != encoded:
+            raise LearnerStateError(
+                "learner event commit visibility is uncertain"
+            )
+        if not outcome.directory_synced:
+            # The exact event is visible and idempotently recoverable. The
+            # host did not expose directory fsync support, so a power-loss
+            # durability guarantee is unavailable.
+            return event
         return event
 
     def _read_events(self) -> tuple[LearnerStateEvent, ...]:
         try:
-            names = sorted(
-                path.name
-                for path in self._events.path.iterdir()
-                if not path.name.startswith(".")
-            )
-        except OSError as exc:
+            names = []
+            for name in self._events.list_names():
+                if name == EVENT_LOCK_FILE or EVENT_TEMP_FILE_PATTERN.fullmatch(
+                    name
+                ):
+                    continue
+                names.append(name)
+            names.sort()
+        except StorageError as exc:
             raise LearnerStateError("cannot list learner event history") from exc
         events: list[LearnerStateEvent] = []
         for expected_sequence, name in enumerate(names, start=1):
@@ -744,12 +658,27 @@ class EventAttemptStore:
             payload = event.payload
             if event.event_type == "attempt_started":
                 checkpoint = AttemptCheckpoint.from_dict(payload["checkpoint"])
+                require_start(
+                    checkpoint,
+                    event.occurred_at,
+                )
                 if checkpoint.attempt_id in entries:
                     raise LearnerStateError("Learner Attempt started more than once")
                 if payload["attempt_kind"] == "review":
-                    EventAttemptStore._require_demonstration_source(
-                        entries.get(payload["review_of_attempt_id"])
+                    EventAttemptStore._require_review_source(
+                        entries.get(payload["review_of_attempt_id"]),
+                        checkpoint,
                     )
+                    if any(
+                        entry.status == "active"
+                        and entry.attempt_kind == "review"
+                        and entry.review_of_attempt_id
+                        == payload["review_of_attempt_id"]
+                        for entry in entries.values()
+                    ):
+                        raise LearnerStateError(
+                            "demonstration already has an active review"
+                        )
                 entries[checkpoint.attempt_id] = AttemptHistoryEntry(
                     checkpoint,
                     "active",
@@ -765,6 +694,11 @@ class EventAttemptStore:
                 existing = entries.get(checkpoint.attempt_id)
                 EventAttemptStore._require_active_previous(existing, payload)
                 assert existing is not None
+                require_checkpoint_transition(
+                    existing.checkpoint,
+                    checkpoint,
+                    event.occurred_at,
+                )
                 entries[checkpoint.attempt_id] = AttemptHistoryEntry(
                     checkpoint,
                     "active",
@@ -780,6 +714,11 @@ class EventAttemptStore:
                 existing = entries.get(checkpoint.attempt_id)
                 EventAttemptStore._require_active_previous(existing, payload)
                 assert existing is not None
+                require_completion_transition(
+                    existing.checkpoint,
+                    checkpoint,
+                    event.occurred_at,
+                )
                 if (
                     payload["attempt_kind"] != existing.attempt_kind
                     or payload["review_of_attempt_id"]
@@ -807,6 +746,11 @@ class EventAttemptStore:
                         "replacement Learner Attempt already exists"
                     )
                 assert previous is not None
+                require_restart_transition(
+                    previous.checkpoint,
+                    checkpoint,
+                    event.occurred_at,
+                )
                 if (
                     payload["attempt_kind"] != previous.attempt_kind
                     or payload["review_of_attempt_id"]
@@ -864,6 +808,43 @@ class EventAttemptStore:
         ):
             raise LearnerStateError(
                 "review does not reference a demonstrated attempt"
+            )
+
+    @staticmethod
+    def _require_review_source(
+        source: AttemptHistoryEntry | None,
+        review: AttemptCheckpoint,
+    ) -> None:
+        EventAttemptStore._require_demonstration_source(source)
+        assert source is not None
+        demonstration = source.checkpoint
+        if (
+            review.pack_id,
+            review.pack_version,
+            review.pack_sha256,
+            review.bundle_sha256,
+            review.lesson_id,
+            review.lesson_revision_sha256,
+            review.outcome_id,
+            review.outcome_revision_sha256,
+            review.renderer.scenario_id,
+            review.renderer.input_sha256,
+            review.renderer.seed,
+        ) != (
+            demonstration.pack_id,
+            demonstration.pack_version,
+            demonstration.pack_sha256,
+            demonstration.bundle_sha256,
+            demonstration.lesson_id,
+            demonstration.lesson_revision_sha256,
+            demonstration.outcome_id,
+            demonstration.outcome_revision_sha256,
+            demonstration.renderer.scenario_id,
+            demonstration.renderer.input_sha256,
+            demonstration.renderer.seed,
+        ):
+            raise LearnerStateError(
+                "review changed the demonstrated learning context"
             )
 
     @staticmethod

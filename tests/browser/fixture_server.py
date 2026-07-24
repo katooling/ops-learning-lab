@@ -51,10 +51,28 @@ def main() -> int:
             PackRepository.open(home.root),
             forbidden_canaries=(CANARY,),
         )
+        attempt_store = EventAttemptStore.open(home.root)
+
+        def clock() -> str:
+            demonstrated = any(
+                entry.status == "completed"
+                and entry.attempt_kind == "learning"
+                and entry.completed_record is not None
+                and entry.completed_record.evaluation is not None
+                and entry.completed_record.evaluation.qualifies
+                for entry in attempt_store.history().attempts
+            )
+            return (
+                "2026-07-31T12:00:00Z"
+                if demonstrated
+                else "2026-07-24T12:00:00Z"
+            )
+
         learning = LearningService(
             service.packs,
             BundleRepository.open(home.root),
-            EventAttemptStore.open(home.root),
+            attempt_store,
+            clock=clock,
         )
         server = make_server(
             updates,

@@ -27,12 +27,15 @@ from .learning import (
 )
 from .learner_state import (
     AttemptHistoryEntry,
+    LearnerHistory,
+)
+from .learning_bundle import LearningPackBundle, LessonBlueprint
+from .lesson_content import build_codex_etl_bundle
+from .review_projection import (
     LearningStateProjection,
     ReviewProjection,
     project_learning_state,
 )
-from .learning_bundle import LearningPackBundle, LessonBlueprint
-from .lesson_content import build_codex_etl_bundle
 
 
 class LearningError(RuntimeError):
@@ -180,6 +183,12 @@ class LearningService:
         bundle = self._current_bundle(pack_id)
         lesson = _lesson(bundle, lesson_id)
         projection, history = self._state(bundle)
+        review = self._review_for_route(
+            pack_id,
+            lesson_id,
+            history,
+            projection.review,
+        )
         return LearningView(
             bundle=bundle,
             lesson=lesson,
@@ -187,7 +196,7 @@ class LearningService:
             evaluation=None,
             record=None,
             mastery=projection.mastery,
-            review=projection.review,
+            review=review,
             history=history,
         )
 
@@ -208,18 +217,43 @@ class LearningService:
     def start(self, pack_id: str, lesson_id: str) -> LearningView:
         return self._start(pack_id, lesson_id, "learning", None)
 
-    def start_review(self, pack_id: str, lesson_id: str) -> LearningView:
+    def start_review(
+        self,
+        pack_id: str,
+        lesson_id: str,
+        demonstration_attempt_id: str,
+        bundle_sha256: str,
+    ) -> LearningView:
         with self._review_lock:
-            bundle = self._current_bundle(pack_id)
+            history = self._durable_history()
+            demonstration = history.get(demonstration_attempt_id)
+            if (
+                demonstration is None
+                or demonstration.checkpoint.pack_id != pack_id
+                or demonstration.checkpoint.lesson_id != lesson_id
+                or demonstration.checkpoint.bundle_sha256 != bundle_sha256
+            ):
+                raise LearningError(
+                    "Review demonstration does not match this lesson"
+                )
+            bundle = self.bundles.snapshot(bundle_sha256)
+            if bundle is None:
+                raise LearningError("Review bundle snapshot is missing")
             lesson = _lesson(bundle, lesson_id)
-            projection, _ = self._state(bundle)
+            projection = project_learning_state(
+                bundle,
+                history,
+                self.clock(),
+            )
             if projection.review.status != "due":
                 raise LearningError("Review is not due yet")
             source = projection.review.demonstrated_by_attempt_id
-            if source is None:
-                raise LearningError("Review has no demonstrated attempt")
-            return self._start(
-                pack_id,
+            if source != demonstration_attempt_id:
+                raise LearningError(
+                    "Review demonstration is not the due artifact"
+                )
+            return self._start_from_bundle(
+                bundle,
                 lesson.lesson_id,
                 "review",
                 source,
@@ -233,6 +267,20 @@ class LearningService:
         review_of_attempt_id: str | None,
     ) -> LearningView:
         bundle = self._current_bundle(pack_id)
+        return self._start_from_bundle(
+            bundle,
+            lesson_id,
+            attempt_kind,
+            review_of_attempt_id,
+        )
+
+    def _start_from_bundle(
+        self,
+        bundle: LearningPackBundle,
+        lesson_id: str,
+        attempt_kind: str,
+        review_of_attempt_id: str | None,
+    ) -> LearningView:
         lesson = _lesson(bundle, lesson_id)
         self.bundles.save(bundle)
         now = self.clock()
@@ -542,6 +590,59 @@ class LearningService:
                 ReviewProjection("not-scheduled", None, None, None),
             ),
             (),
+        )
+
+    def _durable_history(self) -> LearnerHistory:
+        history_method = getattr(self.attempts, "history", None)
+        if not callable(history_method):
+            raise LearningError("durable learner history is unavailable")
+        return history_method()
+
+    def _review_for_route(
+        self,
+        pack_id: str,
+        lesson_id: str,
+        history_entries: tuple[AttemptHistoryEntry, ...],
+        current: ReviewProjection,
+    ) -> ReviewProjection:
+        history_method = getattr(self.attempts, "history", None)
+        if not callable(history_method):
+            return current
+        history = LearnerHistory((), history_entries)
+        seen: set[str] = set()
+        projections: list[ReviewProjection] = []
+        now = self.clock()
+        for entry in history_entries:
+            checkpoint = entry.checkpoint
+            if (
+                checkpoint.pack_id != pack_id
+                or checkpoint.lesson_id != lesson_id
+                or checkpoint.bundle_sha256 in seen
+            ):
+                continue
+            seen.add(checkpoint.bundle_sha256)
+            bundle = self.bundles.snapshot(checkpoint.bundle_sha256)
+            if bundle is None:
+                raise LearningError("Learner Attempt bundle snapshot is missing")
+            projection = project_learning_state(bundle, history, now).review
+            if projection.status != "not-scheduled":
+                projections.append(projection)
+        if not projections:
+            return current
+        priority = {
+            "in-progress": 0,
+            "due": 1,
+            "retry-scheduled": 2,
+            "scheduled": 3,
+            "retained": 4,
+        }
+        return min(
+            projections,
+            key=lambda review: (
+                priority[review.status],
+                review.due_at or "",
+                review.demonstrated_by_attempt_id or "",
+            ),
         )
 
     def _current_bundle(self, pack_id: str) -> LearningPackBundle:
