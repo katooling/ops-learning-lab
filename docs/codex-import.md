@@ -15,7 +15,7 @@ explicit request
 strict stdin schema ---- invalid or broad request ---> stop, write nothing
       |
       v
-exact paste OR selected task turns through a read-only port
+exact paste OR bounded task extract OR selected turns through a read-only port
       |
       v
 private Intake Bundle -> staged Pack Update
@@ -139,47 +139,53 @@ then routes learning.
 
 ## Target selected Codex task turns
 
-The adapter contract supports only an explicit list or range:
+The stock CLI accepts a caller-supplied extract only when it includes an
+explicit list or range. This is the path for a
+`codex-conversation-query`-style skill: the skill reads only the agreed turns,
+then sends their exact text and provenance to the learning adapter.
 
 ```json
 {
   "schema_version": 1,
   "mode": "capture",
   "source": {
-    "kind": "task_turns",
+    "kind": "task_turns_extract",
     "task_id": "synthetic-task-7",
-    "turn_ids": ["turn-2", "turn-4"]
+    "turn_ids": ["turn-2", "turn-4"],
+    "observed_at": "2026-07-24T12:30:00Z",
+    "text": "Exact text from only turn 2 and turn 4."
   }
 }
 ```
 
-or:
+The range form is equally strict:
 
 ```json
 {
   "schema_version": 1,
-  "mode": "capture",
+  "mode": "learn",
   "source": {
-    "kind": "task_turn_range",
+    "kind": "task_turn_range_extract",
     "task_id": "synthetic-task-7",
     "start_turn_id": "turn-2",
-    "end_turn_id": "turn-4"
+    "end_turn_id": "turn-4",
+    "observed_at": "2026-07-24T12:30:00Z",
+    "text": "Exact text from the inclusive turn range."
   }
 }
 ```
 
-There is deliberately no `all`, omitted selection, or whole-history mode. The
-read-only conversation port exposes only `read_selected(task_id, selection)`.
-Its result must echo the requested task and scope before any local write occurs.
-The private manifest retains the task ID, a canonical JSON representation of
-the selected turn IDs or range, observation time, and SHA-256 content identity.
-The canonical scope prevents delimiter-shaped turn IDs from colliding.
+There is deliberately no `all`, omitted selection, mixed list-and-range, or
+whole-history form. The private manifest retains the task ID, a canonical JSON
+representation of the selected turn IDs or range, observation time, and
+SHA-256 content identity. The canonical scope prevents delimiter-shaped turn
+IDs from colliding. Repeating the exact extract is idempotent.
 
-The stock CLI does not have direct Codex task access yet. It rejects these
-requests with `targeted Codex task reads are not configured` and writes
-nothing. A host integration must supply the read-only port; it must not work
-around this by reading the whole task or by using append, resume, rename,
-delete, fork, archive, or message APIs.
+A host integration may instead send `task_turns` or `task_turn_range` without
+inline text and supply the read-only conversation port. That port exposes only
+`read_selected(task_id, selection)`, and its result must echo the exact task
+and scope before any local write occurs. The stock CLI deliberately rejects
+these port-backed forms because it has no direct Codex task authority.
 
 ## Codex skill wrapper contract
 
@@ -189,7 +195,8 @@ skill should:
 1. ask whether the Learner wants Capture Mode or Learn Mode;
 2. ask for exact pasted text or explicit task turn IDs/range;
 3. show the retrieval boundary before reading;
-4. invoke `opslearn codex-import` once through standard input;
+4. retrieve only that boundary and invoke `opslearn codex-import` with the
+   bounded inline extract through standard input;
 5. report only the concise command result;
 6. never start an exercise in Capture Mode;
 7. return `learner_choice_required` unchanged instead of picking a pack;
@@ -197,6 +204,9 @@ skill should:
 
 The wrapper is an explicit caller, not an automatic hook. It does not own
 matching, persistence, Product Shell learning state, or source-task mutation.
+For Learn Mode, `/learn/...` is a ready-to-start overview and `/attempts/...`
+is a durable resume route. The wrapper never presses Start on the Learner's
+behalf.
 
 ## What proves success
 
@@ -207,8 +217,9 @@ PYTHONPATH=src python3 -m unittest tests/test_codex_import.py -v
 ./scripts/verify
 ```
 
-The focused tests prove exact pasted import, targeted synthetic turn retrieval,
-provenance, strict schemas, idempotency, Capture/Learn separation, ambiguous
-choice handling, durable Product Shell open/resume routing, fail-closed
-multiple-attempt handling, CLI lock release, unchanged prior state on retrieval
-errors, and a task port with no mutation capability.
+The focused tests prove exact pasted import, real CLI import of bounded task
+extracts, targeted synthetic turn retrieval, provenance, strict schemas,
+idempotency, Capture/Learn separation, ambiguous choice handling, durable
+Product Shell open/resume routing, fail-closed multiple-attempt handling, CLI
+lock release, unchanged prior state on retrieval errors, and a task port with
+no mutation capability.

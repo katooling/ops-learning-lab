@@ -426,6 +426,12 @@ class EventAttemptStore:
                 self._lock_descriptor = -1
             self._events.close()
 
+    def __enter__(self) -> EventAttemptStore:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
     def get(self, attempt_id: str) -> AttemptCheckpoint | None:
         entry = self.history().get(attempt_id)
         return entry.checkpoint if entry is not None else None

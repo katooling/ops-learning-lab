@@ -139,7 +139,59 @@ class TaskTurnsSource:
         raise SchemaError("source kind is not supported")
 
 
-ImportSource = PastedTextSource | TaskTurnsSource
+@dataclass(frozen=True, slots=True)
+class InlineTaskExtractSource:
+    """A caller-supplied, explicitly bounded Codex task extract."""
+
+    task_id: str
+    selection: TurnSelection
+    observed_at: str
+    text: str
+
+    def __post_init__(self) -> None:
+        _non_empty_text(self.task_id, "task_id")
+        if not isinstance(self.selection, TurnSelection):
+            raise SchemaError("selection must be a TurnSelection")
+        _non_empty_text(self.observed_at, "observed_at")
+        _non_empty_text(self.text, "text")
+
+    @classmethod
+    def from_dict(cls, value: Any) -> InlineTaskExtractSource:
+        if not isinstance(value, dict):
+            raise SchemaError("task extract source must be an object")
+        kind = value.get("kind")
+        common = {"kind", "task_id", "observed_at", "text"}
+        if kind == "task_turns_extract":
+            source = _exact_fields(
+                value,
+                common | {"turn_ids"},
+                "task_turns_extract source",
+            )
+            turn_ids = source["turn_ids"]
+            if not isinstance(turn_ids, list):
+                raise SchemaError("turn_ids must be a list")
+            selection = TurnSelection(turn_ids=tuple(turn_ids))
+        elif kind == "task_turn_range_extract":
+            source = _exact_fields(
+                value,
+                common | {"start_turn_id", "end_turn_id"},
+                "task_turn_range_extract source",
+            )
+            selection = TurnSelection(
+                start_turn_id=source["start_turn_id"],
+                end_turn_id=source["end_turn_id"],
+            )
+        else:
+            raise SchemaError("source kind is not supported")
+        return cls(
+            task_id=source["task_id"],
+            selection=selection,
+            observed_at=source["observed_at"],
+            text=source["text"],
+        )
+
+
+ImportSource = PastedTextSource | TaskTurnsSource | InlineTaskExtractSource
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,7 +210,10 @@ class CodexImportRequest:
             raise SchemaError("unsupported Codex import schema_version")
         if self.mode not in {"capture", "learn"}:
             raise SchemaError("mode must be capture or learn")
-        if not isinstance(self.source, (PastedTextSource, TaskTurnsSource)):
+        if not isinstance(
+            self.source,
+            (PastedTextSource, TaskTurnsSource, InlineTaskExtractSource),
+        ):
             raise SchemaError("source kind is not supported")
         if self.selected_pack_id is not None:
             _non_empty_text(self.selected_pack_id, "selected_pack_id")
@@ -188,6 +243,11 @@ class CodexImportRequest:
             parsed_source: ImportSource = PastedTextSource.from_dict(source)
         elif source.get("kind") in {"task_turns", "task_turn_range"}:
             parsed_source = TaskTurnsSource.from_dict(source)
+        elif source.get("kind") in {
+            "task_turns_extract",
+            "task_turn_range_extract",
+        }:
+            parsed_source = InlineTaskExtractSource.from_dict(source)
         else:
             raise SchemaError("source kind is not supported")
         selected_pack_id = request.get("selected_pack_id")
@@ -429,6 +489,19 @@ class CodexImportService:
                     source_id=source.source_id,
                     observed_at=source.observed_at,
                     retrieval_scope="exact-pasted-text",
+                ),
+            )
+        if isinstance(source, InlineTaskExtractSource):
+            content = source.text.encode("utf-8")
+            if len(content) > MAX_IMPORT_BYTES:
+                raise SchemaError("task extract exceeds the import safety limit")
+            return (
+                content,
+                SourceReference(
+                    source_type="codex-task",
+                    source_id=source.task_id,
+                    observed_at=source.observed_at,
+                    retrieval_scope=source.selection.scope(),
                 ),
             )
         if self.conversation_port is None:
