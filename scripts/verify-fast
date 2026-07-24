@@ -6,7 +6,7 @@ cd "$repo_root"
 
 temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/ops-learning-lab-verify.XXXXXX")
 cleanup() {
-  rm -rf "$temporary_root"
+  find "$temporary_root" -depth -delete
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
