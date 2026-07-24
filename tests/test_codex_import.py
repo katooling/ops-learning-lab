@@ -17,7 +17,18 @@ from ops_learning_lab.codex_import import (
     ProductShellLearningPort,
     TurnSelection,
 )
+from ops_learning_lab.bundle_repository import BundleRepository
 from ops_learning_lab.domain import SchemaError
+from ops_learning_lab.learner_state import (
+    EventAttemptStore,
+    LearnerHistory,
+)
+from ops_learning_lab.learning_service import LearningService
+from ops_learning_lab.promotion_models import (
+    AcceptedClaim,
+    AcceptedPackSnapshot,
+    AcceptedProvenance,
+)
 from ops_learning_lab.pack_repository import PackRepository
 from ops_learning_lab.promotion import PromotionService
 from ops_learning_lab.staging import PackUpdateRepository
@@ -26,6 +37,30 @@ from ops_learning_lab.storage import LearningHome
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = REPOSITORY_ROOT / "src"
+
+
+def accepted_codex_snapshot() -> AcceptedPackSnapshot:
+    return AcceptedPackSnapshot(
+        pack_id="codex-etl",
+        title="Synthetic Codex ETL",
+        version=1,
+        content_sha256="a" * 64,
+        claims=(
+            AcceptedClaim(
+                claim_id="claim-" + "1" * 20,
+                text="A successful job does not prove valid downstream data.",
+                fact_status="current",
+                history_action="add",
+                target_claim_id=None,
+                provenance=AcceptedProvenance(
+                    source_type="synthetic-note",
+                    observed_at="2026-07-24T12:00:00Z",
+                    staged_update_id="update-" + "2" * 20,
+                    proposal_id="proposal-" + "3" * 20,
+                ),
+            ),
+        ),
+    )
 
 
 def run_codex_import(home: Path, request: dict[str, object]) -> subprocess.CompletedProcess[str]:
@@ -105,6 +140,55 @@ class CodexImportCliTests(unittest.TestCase):
                 len(list((home.root / "private" / "inbox").glob("intake-*"))),
                 1,
             )
+
+    def test_capture_does_not_require_the_durable_learning_lock(self) -> None:
+        request = {
+            "schema_version": 1,
+            "mode": "capture",
+            "source": {
+                "kind": "pasted_text",
+                "source_id": "capture-with-open-shell",
+                "observed_at": "2026-07-24T12:00:00Z",
+                "text": "Synthetic Codex ETL usage cost tokens.",
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            home = LearningHome.initialize(Path(directory) / "learning-home")
+            held_by_shell = EventAttemptStore.open(home.root)
+            try:
+                result = run_codex_import(home.root, request)
+            finally:
+                held_by_shell.close()
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["status"], "staged")
+
+    def test_learn_reads_history_while_shell_owns_the_writer_lock(self) -> None:
+        request = {
+            "schema_version": 1,
+            "mode": "learn",
+            "source": {
+                "kind": "pasted_text",
+                "source_id": "novel-learn-lock-release",
+                "observed_at": "2026-07-24T12:00:00Z",
+                "text": "A completely novel synthetic subject.",
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            home = LearningHome.initialize(Path(directory) / "learning-home")
+            held_by_shell = EventAttemptStore.open(home.root)
+            try:
+                result = run_codex_import(home.root, request)
+            finally:
+                held_by_shell.close()
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                json.loads(result.stdout)["status"],
+                "learning_incomplete",
+            )
+            reopened = EventAttemptStore.open(home.root)
+            reopened.close()
 
     def test_strict_stdin_rejects_unknown_fields_without_writing(self) -> None:
         request = {
@@ -540,9 +624,17 @@ class CodexImportServiceTests(unittest.TestCase):
                 self.requested.append(pack_id)
                 return (Lesson(),)
 
+        class NoAttemptHistory:
+            @staticmethod
+            def history():
+                return LearnerHistory((), ())
+
         learning = ExistingLearningService()
 
-        destination = ProductShellLearningPort(learning).open_or_resume(
+        destination = ProductShellLearningPort(
+            learning,
+            NoAttemptHistory(),
+        ).open_or_resume(
             "codex-etl"
         )
 
@@ -553,6 +645,93 @@ class CodexImportServiceTests(unittest.TestCase):
         )
         self.assertEqual(destination.disposition, "opened")
         self.assertIsNone(destination.attempt_id)
+
+    def test_product_shell_adapter_resumes_one_durable_active_attempt(self) -> None:
+        class Packs:
+            @staticmethod
+            def snapshot(pack_id: str):
+                snapshot = accepted_codex_snapshot()
+                return snapshot if pack_id == snapshot.pack_id else None
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = LearningHome.initialize(Path(directory) / "learning-home")
+            attempts = EventAttemptStore.open(home.root)
+            bundles = BundleRepository.open(home.root)
+            try:
+                learning = LearningService(
+                    Packs(),
+                    bundles,
+                    attempts,
+                    clock=lambda: "2026-07-24T12:00:00Z",
+                    attempt_id_factory=lambda: "attempt-0123456789abcdef0123",
+                )
+                started = learning.start(
+                    "codex-etl",
+                    "lesson-codex-etl-quality",
+                )
+
+                destination = ProductShellLearningPort(
+                    learning,
+                    attempts,
+                ).open_or_resume("codex-etl")
+
+                self.assertEqual(destination.disposition, "resumed")
+                self.assertEqual(
+                    destination.path,
+                    "/attempts/attempt-0123456789abcdef0123",
+                )
+                self.assertEqual(
+                    destination.attempt_id,
+                    started.attempt.attempt_id,
+                )
+            finally:
+                bundles.close()
+                attempts.close()
+
+    def test_product_shell_adapter_fails_closed_for_multiple_active_attempts(
+        self,
+    ) -> None:
+        class Packs:
+            @staticmethod
+            def snapshot(pack_id: str):
+                snapshot = accepted_codex_snapshot()
+                return snapshot if pack_id == snapshot.pack_id else None
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = LearningHome.initialize(Path(directory) / "learning-home")
+            attempts = EventAttemptStore.open(home.root)
+            bundles = BundleRepository.open(home.root)
+            ids = iter(
+                (
+                    "attempt-11111111111111111111",
+                    "attempt-22222222222222222222",
+                )
+            )
+            try:
+                learning = LearningService(
+                    Packs(),
+                    bundles,
+                    attempts,
+                    clock=lambda: "2026-07-24T12:00:00Z",
+                    attempt_id_factory=lambda: next(ids),
+                )
+                learning.start("codex-etl", "lesson-codex-etl-quality")
+                learning.start("codex-etl", "lesson-codex-etl-quality")
+                event_count = len(attempts.history().events)
+
+                with self.assertRaisesRegex(
+                    CodexImportError,
+                    "multiple active",
+                ):
+                    ProductShellLearningPort(
+                        learning,
+                        attempts,
+                    ).open_or_resume("codex-etl")
+
+                self.assertEqual(len(attempts.history().events), event_count)
+            finally:
+                bundles.close()
+                attempts.close()
 
     def test_learning_port_error_reports_staged_artifacts_and_preserves_prior_state(
         self,

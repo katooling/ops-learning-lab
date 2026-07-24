@@ -90,9 +90,23 @@ opslearn serve --home /tmp/ops-learning-home --port 8000
 
 Open the returned path under `http://127.0.0.1:8000`. A result with
 `learning_disposition: opened` points to the lesson overview and has no Learner
-Attempt yet. The resume-capable integration boundary can instead return
-`learning_disposition: resumed` and an `attempt_id` after durable attempt
-recovery is available.
+Attempt yet. When durable history contains exactly one active learning attempt
+for that pack and lesson, the command instead returns
+`learning_disposition: resumed`, its `attempt_id`, and
+`/attempts/<attempt_id>`. Completed, reset, review, other-pack, and other-lesson
+attempts are not resume candidates.
+
+More than one matching active attempt is treated as inconsistent state. The
+command returns `learning_incomplete` instead of choosing one silently. Its
+Intake Bundle and staged Pack Update remain available.
+
+Learn Mode opens a descriptor-bound, read-only history projection while
+choosing the route, then closes it before returning. It can run while
+`opslearn serve` owns the exclusive writer lock. The reader has no append,
+complete, restart, or repair methods: the Product Shell remains the only
+writer. It snapshots immutable event names, so an atomic append is either
+included completely or left for the next read. Capture Mode does not inspect
+learner history and may also run while the shell is open.
 
 If the accepted pack has no single supported lesson, the result is
 `learning_incomplete`. The Intake Bundle and staged Pack Update remain
@@ -195,5 +209,6 @@ PYTHONPATH=src python3 -m unittest tests/test_codex_import.py -v
 
 The focused tests prove exact pasted import, targeted synthetic turn retrieval,
 provenance, strict schemas, idempotency, Capture/Learn separation, ambiguous
-choice handling, Product Shell routing, unchanged prior state on retrieval
+choice handling, durable Product Shell open/resume routing, fail-closed
+multiple-attempt handling, CLI lock release, unchanged prior state on retrieval
 errors, and a task port with no mutation capability.

@@ -29,8 +29,8 @@ from .exporting import (
     StandaloneExporter,
 )
 from .json_contract import JsonContractError, decode_json_object
-from .learner_state import EventAttemptStore
-from .learning_service import LearningService
+from .learner_state import EventAttemptHistoryReader, EventAttemptStore
+from .learning_service import InMemoryAttemptStore, LearningService
 from .pack_repository import PackRepository
 from .publishable_home import PublishableHome
 from .promotion import PromotionService
@@ -266,19 +266,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                 decode_json_object(encoded, "Codex import request")
             )
             home = LearningHome.open(arguments.home)
-            attempts = EventAttemptStore.open(home.root)
-            try:
-                learning = LearningService(
-                    PackRepository.open(home.root),
-                    BundleRepository.open(home.root),
-                    attempts,
-                )
-                result = CodexImportService(
-                    home,
-                    learning_port=ProductShellLearningPort(learning),
-                ).run(request)
-            finally:
-                attempts.close()
+            if request.mode == "capture":
+                result = CodexImportService(home).run(request)
+            else:
+                history = EventAttemptHistoryReader.open(home.root)
+                bundles: BundleRepository | None = None
+                try:
+                    bundles = BundleRepository.open(home.root)
+                    learning = LearningService(
+                        PackRepository.open(home.root),
+                        bundles,
+                        InMemoryAttemptStore(),
+                    )
+                    result = CodexImportService(
+                        home,
+                        learning_port=ProductShellLearningPort(
+                            learning,
+                            history,
+                        ),
+                    ).run(request)
+                finally:
+                    if bundles is not None:
+                        bundles.close()
+                    history.close()
             _emit(result)
             return 0
 
@@ -297,27 +307,35 @@ def main(argv: Sequence[str] | None = None) -> int:
             home = LearningHome.open(arguments.home)
             repository = PackUpdateRepository.open(home.root)
             service = _promotion_service(home, arguments.forbidden_canary_file)
-            learning = LearningService(
-                service.packs,
-                BundleRepository.open(home.root),
-                EventAttemptStore.open(home.root),
-            )
-            server = make_server(
-                repository,
-                arguments.host,
-                arguments.port,
-                promotion=service,
-                learning=learning,
-            )
-            host, port = server.server_address[:2]
-            _emit({"status": "serving", "url": f"http://{host}:{port}/"})
-            sys.stdout.flush()
+            attempts = EventAttemptStore.open(home.root)
+            bundles: BundleRepository | None = None
+            server = None
             try:
+                bundles = BundleRepository.open(home.root)
+                learning = LearningService(
+                    service.packs,
+                    bundles,
+                    attempts,
+                )
+                server = make_server(
+                    repository,
+                    arguments.host,
+                    arguments.port,
+                    promotion=service,
+                    learning=learning,
+                )
+                host, port = server.server_address[:2]
+                _emit({"status": "serving", "url": f"http://{host}:{port}/"})
+                sys.stdout.flush()
                 server.serve_forever()
             except KeyboardInterrupt:
                 pass
             finally:
-                server.server_close()
+                if server is not None:
+                    server.server_close()
+                if bundles is not None:
+                    bundles.close()
+                attempts.close()
             return 0
 
         if arguments.command == "promotion-review":
