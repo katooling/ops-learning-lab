@@ -229,6 +229,29 @@ class AttemptHistoryEntry:
     def __post_init__(self) -> None:
         if self.status not in {"active", "completed", "reset"}:
             raise LearnerStateError("attempt history status is invalid")
+        if self.attempt_kind not in ATTEMPT_KINDS:
+            raise LearnerStateError("attempt history kind is invalid")
+        if self.attempt_kind == "learning" and self.review_of_attempt_id is not None:
+            raise LearnerStateError("learning history cannot name a review source")
+        if self.attempt_kind == "review" and not self.review_of_attempt_id:
+            raise LearnerStateError("review history must name a demonstration")
+        if self.status == "completed":
+            if (
+                not self.checkpoint.completed
+                or self.completed_record is None
+                or self.completed_record.checkpoint != self.checkpoint
+                or self.completed_at is None
+                or self.reset_by_attempt_id is not None
+            ):
+                raise LearnerStateError("completed attempt history is incomplete")
+        elif (
+            self.checkpoint.completed
+            or self.completed_record is not None
+            or self.completed_at is not None
+        ):
+            raise LearnerStateError("active or reset history cannot be completed")
+        if (self.status == "reset") != (self.reset_by_attempt_id is not None):
+            raise LearnerStateError("reset attempt history is incomplete")
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,6 +287,25 @@ class ReviewProjection:
             "retained",
         }:
             raise LearnerStateError("review status is invalid")
+        if self.status == "not-scheduled":
+            if any(
+                value is not None
+                for value in (
+                    self.due_at,
+                    self.demonstrated_by_attempt_id,
+                    self.latest_review_attempt_id,
+                )
+            ):
+                raise LearnerStateError("unscheduled review cannot name artifacts")
+        elif self.status == "retained":
+            if (
+                self.due_at is not None
+                or self.demonstrated_by_attempt_id is None
+                or self.latest_review_attempt_id is None
+            ):
+                raise LearnerStateError("retained review artifacts are incomplete")
+        elif self.due_at is None or self.demonstrated_by_attempt_id is None:
+            raise LearnerStateError("scheduled review artifacts are incomplete")
 
 
 @dataclass(frozen=True, slots=True)
@@ -476,6 +518,10 @@ class EventAttemptStore:
                     raise LearnerStateError("Learner Attempt checkpoint is stale")
                 if checkpoint.completed:
                     raise LearnerStateError("new Learner Attempt must start incomplete")
+                if attempt_kind == "review":
+                    self._require_demonstration_source(
+                        history.get(review_of_attempt_id or "")
+                    )
                 event_type = "attempt_started"
                 payload = {
                     "attempt_kind": attempt_kind,
@@ -700,6 +746,10 @@ class EventAttemptStore:
                 checkpoint = AttemptCheckpoint.from_dict(payload["checkpoint"])
                 if checkpoint.attempt_id in entries:
                     raise LearnerStateError("Learner Attempt started more than once")
+                if payload["attempt_kind"] == "review":
+                    EventAttemptStore._require_demonstration_source(
+                        entries.get(payload["review_of_attempt_id"])
+                    )
                 entries[checkpoint.attempt_id] = AttemptHistoryEntry(
                     checkpoint,
                     "active",
@@ -799,6 +849,22 @@ class EventAttemptStore:
             != existing.checkpoint.checkpoint_sha256
         ):
             raise LearnerStateError("learner checkpoint chain is corrupt")
+
+    @staticmethod
+    def _require_demonstration_source(
+        source: AttemptHistoryEntry | None,
+    ) -> None:
+        if (
+            source is None
+            or source.status != "completed"
+            or source.attempt_kind != "learning"
+            or source.completed_record is None
+            or source.completed_record.evaluation is None
+            or not source.completed_record.evaluation.qualifies
+        ):
+            raise LearnerStateError(
+                "review does not reference a demonstrated attempt"
+            )
 
     @staticmethod
     def _command_event(
