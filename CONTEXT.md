@@ -77,8 +77,11 @@ returns without starting a lesson.
 
 ## Learn Mode
 
-The deliberate path that ingests relevant context and then starts an
-appropriate lesson or Scenario.
+The deliberate path that ingests relevant context and routes the Learner into
+the appropriate Product Shell lesson. It resumes exactly one active matching
+attempt. When none exists, it opens the ready-to-start lesson overview; the
+Learner owns the explicit Start action, so the import never creates an attempt
+silently.
 
 ## Stable Concept
 

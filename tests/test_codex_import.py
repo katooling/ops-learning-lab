@@ -28,11 +28,13 @@ from ops_learning_lab.promotion_models import (
     AcceptedClaim,
     AcceptedPackSnapshot,
     AcceptedProvenance,
+    LearningPack,
 )
 from ops_learning_lab.pack_repository import PackRepository
 from ops_learning_lab.promotion import PromotionService
 from ops_learning_lab.staging import PackUpdateRepository
 from ops_learning_lab.storage import LearningHome
+from tests.fixtures_learning import learning_pack
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -84,7 +86,113 @@ def run_codex_import(home: Path, request: dict[str, object]) -> subprocess.Compl
     )
 
 
+def install_accepted_codex_pack(home: LearningHome) -> None:
+    fixture = learning_pack()
+    pack = LearningPack.build(
+        pack_id="codex-etl",
+        title="Synthetic Codex ETL",
+        version=fixture.version,
+        claims=fixture.claims,
+        promotions=fixture.promotions,
+    )
+    pack_root = home.root / "packs" / pack.pack_id
+    pack_root.mkdir()
+    (pack_root / "pack.json").write_text(
+        json.dumps(pack.to_dict(), ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
 class CodexImportCliTests(unittest.TestCase):
+    def test_inline_selected_turns_capture_is_idempotent_and_preserves_scope(
+        self,
+    ) -> None:
+        text = (
+            "Selected turn 2: Synthetic Codex ETL usage cost tokens.\n"
+            "Selected turn 4: Claim: Synthetic normalized cost is non-negative.\n"
+        )
+        request = {
+            "schema_version": 1,
+            "mode": "capture",
+            "source": {
+                "kind": "task_turns_extract",
+                "task_id": "synthetic-task-7",
+                "turn_ids": ["turn-2", "turn-4"],
+                "observed_at": "2026-07-24T12:30:00Z",
+                "text": text,
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            home = LearningHome.initialize(Path(directory) / "learning-home")
+
+            first = run_codex_import(home.root, request)
+            second = run_codex_import(home.root, request)
+
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(first.stdout, second.stdout)
+            result = json.loads(first.stdout)
+            self.assertEqual(result["status"], "staged")
+            self.assertFalse(result["lesson_started"])
+            manifest = home.read_manifest(result["intake_id"])
+            self.assertEqual(manifest.source.source_type, "codex-task")
+            self.assertEqual(manifest.source.source_id, "synthetic-task-7")
+            self.assertEqual(
+                manifest.source.retrieval_scope,
+                '{"turn_ids":["turn-2","turn-4"]}',
+            )
+            self.assertEqual(
+                manifest.source.observed_at,
+                "2026-07-24T12:30:00Z",
+            )
+            raw = (
+                home.root
+                / "private"
+                / "inbox"
+                / manifest.intake_id
+                / manifest.raw_file
+            ).read_bytes()
+            self.assertEqual(raw, text.encode("utf-8"))
+            self.assertEqual(
+                len(list((home.root / "private" / "inbox").glob("intake-*"))),
+                1,
+            )
+
+    def test_inline_turn_range_learn_opens_ready_to_start_route_without_attempt(
+        self,
+    ) -> None:
+        request = {
+            "schema_version": 1,
+            "mode": "learn",
+            "source": {
+                "kind": "task_turn_range_extract",
+                "task_id": "synthetic-task-8",
+                "start_turn_id": "turn-2",
+                "end_turn_id": "turn-4",
+                "observed_at": "2026-07-24T12:45:00Z",
+                "text": "Synthetic Codex ETL usage cost tokens.",
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            home = LearningHome.initialize(Path(directory) / "learning-home")
+            install_accepted_codex_pack(home)
+
+            first = run_codex_import(home.root, request)
+            second = run_codex_import(home.root, request)
+
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(first.stdout, second.stdout)
+            result = json.loads(first.stdout)
+            self.assertEqual(result["status"], "learning_ready")
+            self.assertEqual(result["learning_disposition"], "opened")
+            self.assertEqual(
+                result["learning_path"],
+                "/learn/codex-etl/lesson-codex-etl-quality",
+            )
+            self.assertIsNone(result["attempt_id"])
+            self.assertFalse(result["lesson_started"])
+            with EventAttemptStore.open(home.root) as attempts:
+                self.assertEqual(attempts.history().events, ())
+
     def test_exact_pasted_text_is_staged_once_with_provenance(self) -> None:
         text = (
             "Synthetic Codex ETL usage cost tokens.\n"
@@ -243,6 +351,52 @@ class CodexImportCliTests(unittest.TestCase):
                 [],
             )
 
+    def test_inline_task_extract_rejects_whole_history_and_mixed_selection(
+        self,
+    ) -> None:
+        unsafe_sources = (
+            {
+                "kind": "task_history_extract",
+                "task_id": "synthetic-task-7",
+                "observed_at": "2026-07-24T12:30:00Z",
+                "text": "Synthetic Codex ETL usage.",
+            },
+            {
+                "kind": "task_turns_extract",
+                "task_id": "synthetic-task-7",
+                "turn_ids": ["turn-2"],
+                "start_turn_id": "turn-2",
+                "end_turn_id": "turn-4",
+                "observed_at": "2026-07-24T12:30:00Z",
+                "text": "Synthetic Codex ETL usage.",
+            },
+        )
+        for source in unsafe_sources:
+            with self.subTest(kind=source["kind"]):
+                with tempfile.TemporaryDirectory() as directory:
+                    home = LearningHome.initialize(
+                        Path(directory) / "learning-home"
+                    )
+
+                    result = run_codex_import(
+                        home.root,
+                        {
+                            "schema_version": 1,
+                            "mode": "capture",
+                            "source": source,
+                        },
+                    )
+
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(
+                        list((home.root / "private" / "inbox").iterdir()),
+                        [],
+                    )
+                    self.assertEqual(
+                        list((home.root / "staged" / "updates").iterdir()),
+                        [],
+                    )
+
 
 class CodexImportServiceTests(unittest.TestCase):
     class ReadOnlyConversationPort:
@@ -328,6 +482,36 @@ class CodexImportServiceTests(unittest.TestCase):
                 / manifest.raw_file
             ).read_bytes()
             self.assertEqual(raw, exact_extract)
+
+    def test_inline_task_extract_never_calls_conversation_port(self) -> None:
+        class MutationTrap:
+            def __getattr__(self, name: str):
+                raise AssertionError(
+                    f"source capability should not be used: {name}"
+                )
+
+        request = CodexImportRequest.from_dict(
+            {
+                "schema_version": 1,
+                "mode": "capture",
+                "source": {
+                    "kind": "task_turns_extract",
+                    "task_id": "synthetic-task-7",
+                    "turn_ids": ["turn-2"],
+                    "observed_at": "2026-07-24T12:30:00Z",
+                    "text": "Synthetic Codex ETL usage cost tokens.",
+                },
+            }
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            home = LearningHome.initialize(Path(directory) / "learning-home")
+
+            result = CodexImportService(
+                home,
+                conversation_port=MutationTrap(),
+            ).run(request)
+
+            self.assertEqual(result["status"], "staged")
 
     def test_task_import_requires_an_explicit_selection(self) -> None:
         with self.assertRaisesRegex(SchemaError, "fields do not match"):
