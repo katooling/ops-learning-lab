@@ -95,6 +95,39 @@ class AppendOnlyLearnerHistoryTests(unittest.TestCase):
             self.assertEqual(after, before)
             reopened.close()
 
+    def test_review_cannot_reference_an_active_or_unqualified_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = LearningHome.initialize(Path(directory) / "learning-home")
+            original = completed_attempt().evolve(
+                updated_at=completed_attempt().started_at,
+                next_step="map",
+                prediction=None,
+                renderer=_ready_renderer(completed_attempt()),
+                evidence=(),
+                explanation=None,
+                completed=False,
+            )
+            review = _new_attempt_from(
+                original,
+                "attempt-fedcba9876543210abcd",
+                "2026-07-31T12:00:00Z",
+            )
+            store = EventAttemptStore.open(home.root)
+            store.save(original, expected_checkpoint_sha256=None)
+            before = len(store.history().events)
+            with self.assertRaisesRegex(
+                LearnerStateError,
+                "demonstrated attempt",
+            ):
+                store.save(
+                    review,
+                    expected_checkpoint_sha256=None,
+                    attempt_kind="review",
+                    review_of_attempt_id=original.attempt_id,
+                )
+            self.assertEqual(len(store.history().events), before)
+            store.close()
+
     def test_stale_reset_and_corruption_fail_without_rewriting_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             home = LearningHome.initialize(Path(directory) / "learning-home")
