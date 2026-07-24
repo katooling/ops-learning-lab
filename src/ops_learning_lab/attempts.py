@@ -148,21 +148,26 @@ class Explanation:
 class RendererCheckpoint:
     """Only sanitized immutable input identity and deterministic renderer output."""
 
-    activity_id: str
+    scenario_id: str
     input_sha256: str
-    seed: str
+    seed: int
     effective_actions: tuple[str, ...]
     action_history: tuple[str, ...]
     result: ActivityResult
 
     def __post_init__(self) -> None:
-        _identifier(self.activity_id, "renderer activity_id")
+        _identifier(self.scenario_id, "renderer scenario_id")
         if (
             not isinstance(self.input_sha256, str)
             or not SHA256_PATTERN.fullmatch(self.input_sha256)
         ):
             raise SchemaError("renderer input_sha256 must be a SHA-256 digest")
-        _non_empty(self.seed, "renderer seed")
+        if (
+            not isinstance(self.seed, int)
+            or isinstance(self.seed, bool)
+            or self.seed < 1
+        ):
+            raise SchemaError("renderer seed must be a positive integer")
         if not isinstance(self.effective_actions, tuple) or not isinstance(
             self.action_history, tuple
         ):
@@ -184,7 +189,7 @@ class RendererCheckpoint:
         if not isinstance(self.result, ActivityResult):
             raise SchemaError("renderer result does not match the schema")
         if (
-            self.result.activity_id != self.activity_id
+            self.result.scenario_id != self.scenario_id
             or self.result.input_sha256 != self.input_sha256
             or self.result.seed != self.seed
         ):
@@ -195,7 +200,7 @@ class RendererCheckpoint:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "activity_id": self.activity_id,
+            "scenario_id": self.scenario_id,
             "input_sha256": self.input_sha256,
             "seed": self.seed,
             "effective_actions": list(self.effective_actions),
@@ -206,7 +211,7 @@ class RendererCheckpoint:
     @classmethod
     def from_dict(cls, value: Any) -> RendererCheckpoint:
         expected = {
-            "activity_id",
+            "scenario_id",
             "input_sha256",
             "seed",
             "effective_actions",
@@ -220,7 +225,7 @@ class RendererCheckpoint:
         ):
             raise SchemaError("renderer checkpoint action fields must be lists")
         return cls(
-            activity_id=value["activity_id"],
+            scenario_id=value["scenario_id"],
             input_sha256=value["input_sha256"],
             seed=value["seed"],
             effective_actions=tuple(value["effective_actions"]),
@@ -240,7 +245,7 @@ class AttemptCheckpoint:
     outcome_revision_sha256: str
     started_at: str
     updated_at: str
-    loop_step: str
+    next_step: str
     prediction: Prediction | None
     renderer: RendererCheckpoint
     evidence: tuple[EvidenceDecision, ...]
@@ -283,8 +288,8 @@ class AttemptCheckpoint:
         )
         if normalize(updated) < normalize(started):
             raise SchemaError("updated_at cannot precede started_at")
-        if self.loop_step not in LOOP_STEPS:
-            raise SchemaError("loop_step does not match the schema")
+        if self.next_step not in LOOP_STEPS:
+            raise SchemaError("next_step does not match the schema")
         if self.prediction is not None and not isinstance(
             self.prediction, Prediction
         ):
@@ -323,7 +328,7 @@ class AttemptCheckpoint:
             raise SchemaError("checkpoint_sha256 does not match attempt content")
 
     def _validate_step(self) -> None:
-        index = LOOP_STEPS.index(self.loop_step)
+        index = LOOP_STEPS.index(self.next_step)
         if index < LOOP_STEPS.index("try") and self.prediction is not None:
             raise SchemaError("prediction cannot exist before the Try step")
         if index >= LOOP_STEPS.index("try") and self.prediction is None:
@@ -336,7 +341,7 @@ class AttemptCheckpoint:
             raise SchemaError("evidence cannot be decided before Explain")
         if index >= LOOP_STEPS.index("explain") and not self.evidence:
             raise SchemaError("Explain and later steps require evidence decisions")
-        if self.loop_step == "complete":
+        if self.next_step == "complete":
             if self.explanation is None or not self.completed:
                 raise SchemaError("a complete attempt needs an explanation")
         elif self.explanation is not None or self.completed:
@@ -354,7 +359,7 @@ class AttemptCheckpoint:
             "outcome_revision_sha256": self.outcome_revision_sha256,
             "started_at": self.started_at,
             "updated_at": self.updated_at,
-            "loop_step": self.loop_step,
+            "next_step": self.next_step,
             "prediction": (
                 self.prediction.to_dict()
                 if self.prediction is not None
@@ -416,7 +421,7 @@ class AttemptCheckpoint:
             "outcome_revision_sha256",
             "started_at",
             "updated_at",
-            "loop_step",
+            "next_step",
             "prediction",
             "renderer",
             "evidence",
@@ -442,7 +447,7 @@ class AttemptCheckpoint:
             outcome_revision_sha256=value["outcome_revision_sha256"],
             started_at=value["started_at"],
             updated_at=value["updated_at"],
-            loop_step=value["loop_step"],
+            next_step=value["next_step"],
             prediction=(
                 Prediction.from_dict(value["prediction"])
                 if value["prediction"] is not None

@@ -66,9 +66,9 @@ class SyntheticUsageRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class ActivitySpec:
-    activity_id: str
-    seed: str
+class EtlActivityInput:
+    scenario_id: str
+    seed: int
     records: tuple[SyntheticUsageRecord, ...]
     cost_cents_per_credit: int
     stop_on_validation_failure: bool
@@ -78,11 +78,16 @@ class ActivitySpec:
         if self.schema_version != ACTIVITY_SCHEMA_VERSION:
             raise SchemaError("unsupported activity schema_version")
         if (
-            not isinstance(self.activity_id, str)
-            or not ACTIVITY_ID_PATTERN.fullmatch(self.activity_id)
+            not isinstance(self.scenario_id, str)
+            or not ACTIVITY_ID_PATTERN.fullmatch(self.scenario_id)
         ):
-            raise SchemaError("activity_id must be lowercase kebab-case")
-        _non_empty(self.seed, "activity seed")
+            raise SchemaError("scenario_id must be lowercase kebab-case")
+        if (
+            not isinstance(self.seed, int)
+            or isinstance(self.seed, bool)
+            or self.seed < 1
+        ):
+            raise SchemaError("activity seed must be a positive integer")
         if (
             not isinstance(self.records, tuple)
             or not self.records
@@ -101,7 +106,7 @@ class ActivitySpec:
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
-            "activity_id": self.activity_id,
+            "scenario_id": self.scenario_id,
             "seed": self.seed,
             "records": [record.to_dict() for record in self.records],
             "cost_cents_per_credit": self.cost_cents_per_credit,
@@ -115,9 +120,9 @@ class ActivitySpec:
 
 @dataclass(frozen=True, slots=True)
 class ActivityResult:
-    activity_id: str
+    scenario_id: str
     input_sha256: str
-    seed: str
+    seed: int
     status: str
     source_rows: int
     raw_rows: int
@@ -135,16 +140,21 @@ class ActivityResult:
         if self.schema_version != ACTIVITY_SCHEMA_VERSION:
             raise SchemaError("unsupported activity result schema_version")
         if (
-            not isinstance(self.activity_id, str)
-            or not ACTIVITY_ID_PATTERN.fullmatch(self.activity_id)
+            not isinstance(self.scenario_id, str)
+            or not ACTIVITY_ID_PATTERN.fullmatch(self.scenario_id)
         ):
-            raise SchemaError("result activity_id does not match the schema")
+            raise SchemaError("result scenario_id does not match the schema")
         if (
             not isinstance(self.input_sha256, str)
             or not SHA256_PATTERN.fullmatch(self.input_sha256)
         ):
             raise SchemaError("result input_sha256 must be a SHA-256 digest")
-        _non_empty(self.seed, "result seed")
+        if (
+            not isinstance(self.seed, int)
+            or isinstance(self.seed, bool)
+            or self.seed < 1
+        ):
+            raise SchemaError("result seed must be a positive integer")
         if self.status not in ACTIVITY_STATUSES:
             raise SchemaError("result status does not match the schema")
         for field in (
@@ -174,7 +184,7 @@ class ActivityResult:
     def _state_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
-            "activity_id": self.activity_id,
+            "scenario_id": self.scenario_id,
             "input_sha256": self.input_sha256,
             "seed": self.seed,
             "status": self.status,
@@ -207,7 +217,7 @@ class ActivityResult:
     def from_dict(cls, value: Any) -> ActivityResult:
         expected = {
             "schema_version",
-            "activity_id",
+            "scenario_id",
             "input_sha256",
             "seed",
             "status",
@@ -227,9 +237,9 @@ class ActivityResult:
         return cls(**value)
 
 
-CODEX_ETL_ACTIVITY = ActivitySpec(
-    activity_id="codex-etl-nonblocking-uniqueness",
-    seed="codex-etl-quality-v1",
+CODEX_ETL_ACTIVITY = EtlActivityInput(
+    scenario_id="codex-etl-nonblocking-uniqueness",
+    seed=7,
     records=(
         SyntheticUsageRecord(
             event_id="event-001",
@@ -256,7 +266,7 @@ CODEX_ETL_ACTIVITY = ActivitySpec(
 
 
 def render_activity(
-    spec: ActivitySpec,
+    spec: EtlActivityInput,
     actions: tuple[str, ...],
 ) -> ActivityResult:
     """Return current deterministic state; no storage capability crosses this seam."""
@@ -265,7 +275,7 @@ def render_activity(
         raise SchemaError("activity actions do not match the supported sequence")
 
     common = {
-        "activity_id": spec.activity_id,
+        "scenario_id": spec.scenario_id,
         "input_sha256": spec.input_sha256,
         "seed": spec.seed,
         "source_rows": len(spec.records),
@@ -316,3 +326,17 @@ def render_activity(
         downstream_cost_cents=downstream_cost,
         unique_cost_cents=unique_cost,
     )
+
+
+def render_scenario(
+    scenario_id: str,
+    seed: int,
+    actions: tuple[str, ...],
+) -> ActivityResult:
+    """Resolve only the public built-in scenario and fail closed otherwise."""
+
+    if scenario_id != CODEX_ETL_ACTIVITY.scenario_id:
+        raise SchemaError("unknown synthetic scenario")
+    if seed != CODEX_ETL_ACTIVITY.seed:
+        raise SchemaError("scenario seed does not match the built-in revision")
+    return render_activity(CODEX_ETL_ACTIVITY, actions)
