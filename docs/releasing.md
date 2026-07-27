@@ -102,3 +102,25 @@ Lightweight tags fail the release audit because they have no tagger identity.
 
 The private learning home and browser test artifacts are not release evidence
 and must not be committed.
+
+## Record machine-readable local state
+
+After the release gate passes, record the exact clean repository state outside
+the repository:
+
+```bash
+python3 scripts/release_status.py > /tmp/ops-learning-lab-candidate.json
+```
+
+After creating an annotated tag, require that exact tag to point to `HEAD`:
+
+```bash
+python3 scripts/release_status.py \
+  --expect-tag v0.1.0 \
+  > /tmp/ops-learning-lab-v0.1.0.json
+```
+
+The command is read-only and deterministic for the same Git state. It fails on
+a dirty worktree, shallow history, a lightweight version tag, an unexpected
+tag, or a tag that does not point to `HEAD`. It complements `./scripts/verify`;
+it does not replace any verification gate.
