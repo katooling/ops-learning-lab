@@ -120,7 +120,8 @@ python3 scripts/release_status.py \
   > /tmp/ops-learning-lab-v0.1.0.json
 ```
 
-The command is read-only and deterministic for the same Git state. It fails on
-a dirty worktree, shallow history, a lightweight version tag, an unexpected
-tag, or a tag that does not point to `HEAD`. It complements `./scripts/verify`;
-it does not replace any verification gate.
+The command is read-only and deterministic for the same Git state. It always
+fails on a dirty worktree, shallow history, a lightweight version tag, or
+multiple version tags at `HEAD`. With `--expect-tag`, it also fails when that
+exact annotated tag does not point to `HEAD`. It complements
+`./scripts/verify`; it does not replace any verification gate.
