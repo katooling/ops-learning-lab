@@ -20,7 +20,7 @@ class ReleaseStatusError(RuntimeError):
 
 def git(repo: Path, *arguments: str, check: bool = True) -> str:
     result = subprocess.run(
-        ("git", "-C", str(repo), *arguments),
+        ("git", "--no-optional-locks", "-C", str(repo), *arguments),
         check=False,
         capture_output=True,
         text=True,

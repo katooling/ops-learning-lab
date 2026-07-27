@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -43,6 +44,27 @@ class ReleaseStatusTests(unittest.TestCase):
             self.assertFalse(first["shallow"])
             self.assertIsNone(first["release_tag"])
             json.dumps(first, sort_keys=True)
+
+    def test_inspection_does_not_refresh_the_git_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = initialize_repository(Path(temporary))
+            index = repo / ".git" / "index"
+            before_bytes = index.read_bytes()
+            before_mtime = index.stat().st_mtime_ns
+            tracked = repo / "safe.txt"
+            tracked_stat = tracked.stat()
+            os.utime(
+                tracked,
+                ns=(
+                    tracked_stat.st_atime_ns,
+                    tracked_stat.st_mtime_ns + 1_000_000_000,
+                ),
+            )
+
+            inspect_release(repo)
+
+            self.assertEqual(index.read_bytes(), before_bytes)
+            self.assertEqual(index.stat().st_mtime_ns, before_mtime)
 
     def test_dirty_and_shallow_repositories_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
