@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$repo_root"
+
+temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/ops-learning-lab-verify.XXXXXX")
+cleanup() {
+  find "$temporary_root" -depth -delete
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -v
+PYTHONPYCACHEPREFIX="$temporary_root/pycache" python3 -m compileall -q src tests scripts
+python3 scripts/check_markdown_links.py
+python3 scripts/audit_publication.py
+
+python3 -m venv "$temporary_root/install"
+"$temporary_root/install/bin/python" \
+  -m pip install --disable-pip-version-check --no-deps -e .
+"$temporary_root/install/bin/opslearn" --help >/dev/null

@@ -165,7 +165,7 @@ sensitive-data detector.
 Run:
 
 ```bash
-./scripts/verify
+./scripts/verify-fast
 ```
 
 `PromotionHttpJourneyTests` is the highest-seam proof. It opens the real HTTP
@@ -186,12 +186,12 @@ private canary is absent.
 - strict malformed-input handling;
 - symlink and named-pipe rejection.
 
-The test-only real-browser proof is separate from the dependency-free runtime:
+The release gate includes the test-only real-browser proof:
 
 ```bash
 npm --prefix tests/browser ci
 (cd tests/browser && npx playwright install chromium)
-./scripts/verify-browser
+./scripts/verify
 ```
 
 It uses Chromium and keyboard input only to prove native required-field

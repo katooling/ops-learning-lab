@@ -78,7 +78,7 @@ review, preview, and Promotion flow described in the
 Run:
 
 ```bash
-./scripts/verify
+./scripts/verify-fast
 ```
 
 `CaptureModeJourneyTests.test_capture_stages_once_and_shell_never_serves_raw_intake`

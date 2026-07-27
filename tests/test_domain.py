@@ -31,6 +31,20 @@ class IntakeManifestTests(unittest.TestCase):
 
         self.assertEqual(SourceReference.from_dict(source.to_dict()), source)
 
+    def test_explicit_null_retrieval_scope_fails_closed(self) -> None:
+        with self.assertRaisesRegex(
+            SchemaError,
+            "retrieval_scope must be a non-empty string",
+        ):
+            SourceReference.from_dict(
+                {
+                    "source_type": "codex-task",
+                    "source_id": "synthetic-task-7",
+                    "observed_at": "2026-07-24T12:00:00Z",
+                    "retrieval_scope": None,
+                }
+            )
+
     def test_unknown_fields_fail_closed(self) -> None:
         value = {
             "schema_version": 1,

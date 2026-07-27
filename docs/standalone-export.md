@@ -121,18 +121,19 @@ This check proves the exact configured canaries are absent. It is not a
 universal secret or personal-data detector; explicit review and the typed
 allowlist remain required.
 
-Run the complete verification:
+Run the fast development proof:
 
 ```bash
-./scripts/verify
+./scripts/verify-fast
 ```
 
-Run the real-browser proof after installing its test-only dependencies:
+Before release, install the test-only browser dependencies and run the single
+release gate:
 
 ```bash
 npm --prefix tests/browser ci
 (cd tests/browser && npx playwright install chromium)
-./scripts/verify-browser
+./scripts/verify
 ```
 
 The highest-seam Python proof captures a private canary, promotes independently

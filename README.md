@@ -1,116 +1,136 @@
 # Ops Learning Lab
 
-Ops Learning Lab turns raw work context into private, evidence-aware learning packs.
+Ops Learning Lab turns selected work context into private, evidence-aware
+learning packs. It is a local-first personal lab: raw context stays in a
+private Learning Home, reviewed material becomes a Learning Pack, and progress
+comes from practice rather than reading alone.
 
-The first release is local-first. It captures source material into a private learning home, preserves provenance, stages reviewed pack updates, teaches through safe simulations, and exports only explicitly promoted content.
-
-## Current phase
-
-The first vertical slice now persists one evidence-centered lesson through
-interruption and a later review:
+Version 0.1.0 proves one complete synthetic Codex ETL lesson:
 
 ```text
-raw source -> private intake + provenance manifest
-        |       (unmarked raw lines stay private)
-        v
-deterministic match -> immutable staged proposal -> explicit Promotion
-                                                    |
-                                                    v
-                                         accepted Learning Pack
-                                                    |
-                                                    v
-                         Map -> Predict -> Try -> Prove -> Explain -> Review
-                                                    |
-                                                    v
-                              private append-only attempt event history
-                                                    |
-                                                    v
-                                 scheduled later review -> Retained
+Capture context                         Learn deliberately
+      |                                       |
+      v                                       v
+private intake -> staged proposal -> review + Promotion
+                                           |
+                                           v
+                                accepted Learning Pack
+                                           |
+                                           v
+                     Map -> Predict -> Try -> Prove -> Explain
+                                           |
+                                           v
+                           later review -> Retained mastery
+                                           |
+                                           v
+                              explicitly approved export
 ```
 
-## Product documentation
+Raw intake, staged proposals, learner history, accepted content, and exports
+are separate trust zones. Nothing publishes automatically.
 
-- [Domain language](CONTEXT.md)
-- [Version one product specification](docs/specs/v1.md)
-- [Architecture decisions](docs/adr/)
-- [Capture Mode guide](docs/capture-mode.md)
-- [Explicit Codex import guide](docs/codex-import.md)
-- [Staged Pack Update contract](docs/staged-update-contract.md)
-- [Promotion guide](docs/promotion.md)
-- [Accepted Learning Pack contract](docs/accepted-pack-contract.md)
-- [Evidence-centered lesson guide](docs/evidence-centered-lesson.md)
-- [Learning Pack Bundle contract](docs/learning-pack-bundle.md)
-- [Standalone export guide](docs/standalone-export.md)
-- [Resume and retained-mastery guide](docs/resume-and-review.md)
-- [Contributor and agent guidance](AGENTS.md)
+## Install
 
-## Requirements
+Requirements:
 
-- Python 3.11 or newer
-- No third-party runtime dependencies
-
-## Try the Capture Mode tracer
+- Python 3.11 or newer;
+- no third-party runtime dependencies.
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e .
+```
 
+## Try one safe learning journey
+
+Create the Learning Home outside this Git repository:
+
+```bash
 opslearn init --home /tmp/ops-learning-home
-cat >/tmp/source.txt <<'EOF'
+cat >/tmp/synthetic-source.txt <<'EOF'
 Synthetic Codex ETL usage and cost context.
 Claim: Normalized synthetic cost should be non-negative.
 EOF
 opslearn capture \
   --home /tmp/ops-learning-home \
   --source-type pasted-text \
-  --source-id example-1 \
-  --input /tmp/source.txt
+  --source-id synthetic-example \
+  --input /tmp/synthetic-source.txt
 opslearn serve --home /tmp/ops-learning-home --port 8000
 ```
 
-Open `http://127.0.0.1:8000/`. The shell reviews only the staged proposal, then
-requires a no-write preview and explicit confirmation before Promotion. After
-Promotion, the accepted Codex ETL pack opens one public synthetic lesson. The
-shell has no route for raw intake.
+Open `http://127.0.0.1:8000/`. Review the staged proposal, preview and confirm
+Promotion, open the lesson, and follow:
 
-In another terminal, the privacy check remains available:
-
-```bash
-opslearn audit-privacy \
-  --home /tmp/ops-learning-home \
-  --canary-file /tmp/source.txt
+```text
+Map -> Predict -> Try -> Prove -> Explain
 ```
 
-The final command succeeds only when the source bytes are absent from `packs/`, `snapshots/`, and `exports/`.
+Restarting the server with the same Learning Home restores an active attempt.
+A successful attempt schedules a later review; only a qualifying later attempt
+earns **Retained** mastery.
+
+The [complete first journey](docs/getting-started.md) explains every step,
+including explicit Codex Capture/Learn requests, recovery, and export.
+
+## Capture or Learn?
+
+| Choice | What it does | What it never does |
+|---|---|---|
+| **Capture Mode** | Stores selected context and stages a proposal, then returns. | Starts or resumes an exercise. |
+| **Learn Mode** | Performs the same capture, then opens or resumes one matching lesson. | Chooses between ambiguous packs or presses Start for you. |
+
+Both paths preserve provenance. Neither path modifies the source conversation
+or silently promotes raw material. See
+[Capture and Learn semantics](docs/getting-started.md#choose-capture-or-learn).
+
+## Documentation
+
+- [Complete first journey](docs/getting-started.md)
+- [Privacy boundaries](docs/privacy-boundaries.md)
+- [Recovery guide](docs/recovery.md)
+- [Release verification](docs/releasing.md)
+- [Version 0.1.0 limitations](docs/limitations.md)
+- [Domain language](CONTEXT.md)
+- [Product specification](docs/specs/v1.md)
+- [Architecture decisions](docs/adr/)
+- [Explicit Codex import](docs/codex-import.md)
+- [Promotion](docs/promotion.md)
+- [Evidence-centered lesson](docs/evidence-centered-lesson.md)
+- [Resume and retained mastery](docs/resume-and-review.md)
+- [Standalone export](docs/standalone-export.md)
+- [Changelog](CHANGELOG.md)
 
 ## Verify
 
+For ordinary development:
+
 ```bash
-./scripts/verify
+./scripts/verify-fast
 ```
 
-The verification command runs the black-box CLI and domain tests, Python
-compilation, relative-file link checks, the publication audit, and a clean
-editable-install smoke test.
-
-The optional test-only Chromium journey has its own explicit dependency step:
+Before release, install the test-only browser tools once and run the single
+release gate:
 
 ```bash
 npm --prefix tests/browser ci
 (cd tests/browser && npx playwright install chromium)
-./scripts/verify-browser
+./scripts/verify
 ```
 
-CI runs this browser proof in a separate job. Playwright is not a product
-runtime dependency.
+`verify` runs fast checks, complete-history safety, real Chromium journeys,
+and a final publication audit. Playwright is a test dependency, not a product
+dependency. See [Release verification](docs/releasing.md) for the exact gates
+and the fail-closed recovery path.
 
 ## Safety
 
 - Use only synthetic or sanitized material in this public repository.
-- Keep real conversations, screenshots, attachments, and internal documents outside the repository.
-- Capture and audit commands operate only on the learning home passed with `--home`.
-- The application does not send messages or mutate external systems.
+- Keep Learning Homes, real conversations, screenshots, attachments, and
+  internal documents outside the repository.
+- Treat Promotion and export as explicit review decisions.
+- The application sends no messages and mutates no external systems.
 
 ## License
 

@@ -59,6 +59,19 @@ class PublicationAuditTests(unittest.TestCase):
                 any("secret-shaped value" in item for item in violations)
             )
 
+    def test_absolute_home_path_fails_even_when_username_contains_s(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            git(root, "init")
+            private_path = "/" + "Users/synthetic/private/source.txt\n"
+            (root / "bad.txt").write_text(private_path)
+
+            violations = audit_publication.audit_repository(root)
+
+            self.assertTrue(
+                any("absolute home path" in item for item in violations)
+            )
+
     def test_symlink_candidate_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

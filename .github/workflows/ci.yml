@@ -9,23 +9,26 @@ permissions:
   contents: read
 
 jobs:
-  verify:
+  fast:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.11", "3.13"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
-      - name: Verify
-        run: ./scripts/verify
+          python-version: "3.11"
+      - name: Fast verification
+        run: ./scripts/verify-fast
 
-  browser:
+  release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -40,9 +43,8 @@ jobs:
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
         working-directory: tests/browser
-      - name: Verify real-browser Promotion journey
-        run: npm test
-        working-directory: tests/browser
+      - name: Release verification
+        run: ./scripts/verify
       - name: Upload browser failure artifacts
         if: failure()
         uses: actions/upload-artifact@v4
