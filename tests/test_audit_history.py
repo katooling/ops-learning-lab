@@ -47,9 +47,10 @@ class HistoryAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             initialize(root)
-            (root / "README.md").write_text("Synthetic public content\n")
+            safe_path = root / "secret-handling-guide.md"
+            safe_path.write_text("Synthetic public content\n")
             commit(root)
-            (root / "README.md").write_text("Updated synthetic public content\n")
+            safe_path.write_text("Updated synthetic public content\n")
             commit(root, "safe update")
 
             self.assertEqual(
@@ -101,6 +102,30 @@ class HistoryAuditTests(unittest.TestCase):
             self.assertTrue(
                 any("secret-shaped value" in item for item in violations)
             )
+
+    def test_deleted_secret_shaped_path_is_fingerprinted_not_echoed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            initialize(root)
+            sensitive_name = "fixture-" + "gh" + "p_" + ("A" * 24) + ".txt"
+            (root / sensitive_name).write_text("Synthetic public content\n")
+            commit(root)
+            (root / sensitive_name).unlink()
+            (root / "README.md").write_text("Safe replacement\n")
+            commit(root, "remove synthetic path")
+
+            violations = audit_history.audit_repository(
+                root,
+                approved_emails=APPROVED,
+            )
+
+            self.assertTrue(
+                any(
+                    "reachable path" in item and "secret-shaped" in item
+                    for item in violations
+                )
+            )
+            self.assertFalse(any(sensitive_name in item for item in violations))
 
     def test_deleted_historical_home_path_still_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

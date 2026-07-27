@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
 import re
 import subprocess
 import sys
@@ -25,6 +26,10 @@ SECRET_PATTERNS = (
 )
 ABSOLUTE_HOME_PATTERN = re.compile(rb"/(?:Users|home)/[^/\s]+/")
 MAX_PUBLIC_FILE_BYTES = 2_000_000
+
+
+def _safe_path_fingerprint(raw_path: bytes) -> str:
+    return hashlib.sha256(raw_path).hexdigest()[:12]
 
 
 def candidates(root: Path = ROOT) -> list[Path]:
@@ -56,8 +61,14 @@ def audit_repository(root: Path = ROOT) -> list[str]:
     violations: list[str] = []
     for path in candidates(root):
         relative = path.relative_to(root)
+        raw_relative = relative.as_posix().encode("utf-8")
+        if any(pattern.search(raw_relative) for pattern in SECRET_PATTERNS):
+            label = f"tracked path sha256:{_safe_path_fingerprint(raw_relative)}"
+            violations.append(f"{label}: contains a secret-shaped value")
+        else:
+            label = str(relative)
         if path.is_symlink():
-            violations.append(f"{relative}: symbolic links are not publishable")
+            violations.append(f"{label}: symbolic links are not publishable")
             continue
         is_environment_file = path.name == ".env" or (
             path.name.startswith(".env.") and path.name != ".env.example"
@@ -67,17 +78,17 @@ def audit_repository(root: Path = ROOT) -> list[str]:
             or path.name in FORBIDDEN_NAMES
             or path.suffix.lower() in FORBIDDEN_SUFFIXES
         ):
-            violations.append(f"{relative}: forbidden file type")
+            violations.append(f"{label}: forbidden file type")
             continue
         if path.stat().st_size > MAX_PUBLIC_FILE_BYTES:
-            violations.append(f"{relative}: file exceeds publication size limit")
+            violations.append(f"{label}: file exceeds publication size limit")
             continue
         data = path.read_bytes()
         if ABSOLUTE_HOME_PATTERN.search(data):
-            violations.append(f"{relative}: contains an absolute home path")
+            violations.append(f"{label}: contains an absolute home path")
         for pattern in SECRET_PATTERNS:
             if pattern.search(data):
-                violations.append(f"{relative}: contains a secret-shaped value")
+                violations.append(f"{label}: contains a secret-shaped value")
                 break
     return violations
 
