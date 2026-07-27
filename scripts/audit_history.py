@@ -73,6 +73,10 @@ def _safe_email_fingerprint(email: str) -> str:
     return hashlib.sha256(email.encode("utf-8")).hexdigest()[:12]
 
 
+def _safe_path_fingerprint(raw_path: bytes) -> str:
+    return hashlib.sha256(raw_path).hexdigest()[:12]
+
+
 def _scan_bytes(label: str, data: bytes) -> list[str]:
     violations: list[str] = []
     if ABSOLUTE_HOME_PATTERN.search(data):
@@ -259,8 +263,15 @@ def _audit_blobs(root: Path, commits: list[str]) -> list[str]:
             if entry in scanned_entries:
                 continue
             scanned_entries.add(entry)
-            path = _display_path(raw_path)
-            label = f"reachable blob {object_id} at {path}"
+            if any(pattern.search(raw_path) for pattern in SECRET_PATTERNS):
+                path_label = f"path sha256:{_safe_path_fingerprint(raw_path)}"
+                violations.append(
+                    f"commit {commit_id} reachable {path_label}: "
+                    "contains a secret-shaped value"
+                )
+            else:
+                path_label = _display_path(raw_path)
+            label = f"reachable blob {object_id} at {path_label}"
             if mode not in REGULAR_BLOB_MODES:
                 violations.append(f"{label}: unsafe Git mode {mode.decode('ascii')}")
             reason = _unsafe_path_reason(raw_path)

@@ -28,7 +28,9 @@ class PublicationAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             git(root, "init")
-            (root / "README.md").write_text("Synthetic public content\n")
+            (root / "secret-handling-guide.md").write_text(
+                "Synthetic public content\n"
+            )
 
             self.assertEqual(audit_publication.audit_repository(root), [])
 
@@ -58,6 +60,24 @@ class PublicationAuditTests(unittest.TestCase):
             self.assertTrue(
                 any("secret-shaped value" in item for item in violations)
             )
+
+    def test_secret_shaped_tracked_path_is_fingerprinted_not_echoed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            git(root, "init")
+            sensitive_name = "fixture-" + "gh" + "p_" + ("A" * 24) + ".txt"
+            (root / sensitive_name).write_text("Synthetic public content\n")
+            git(root, "add", sensitive_name)
+
+            violations = audit_publication.audit_repository(root)
+
+            self.assertTrue(
+                any(
+                    "tracked path" in item and "secret-shaped" in item
+                    for item in violations
+                )
+            )
+            self.assertFalse(any(sensitive_name in item for item in violations))
 
     def test_absolute_home_path_fails_even_when_username_contains_s(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
